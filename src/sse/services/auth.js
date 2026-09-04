@@ -4,6 +4,7 @@ import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLock
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
+import { applyAccountRouting } from "open-sse/services/accountRouting.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -134,6 +135,24 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
 
     const settings = await getSettings();
+
+    // Custom model→account routing: narrow the eligible set (plan tier, tags,
+    // per-account allowlists, …) and optionally reorder/override strategy.
+    const routingOutcome = applyAccountRouting({
+      connections: availableConnections,
+      providerId,
+      model,
+      routing: settings.accountRouting,
+    });
+    const eligibleConnections = routingOutcome.connections;
+    if (routingOutcome.reason) {
+      log.info("AUTH", `${provider} | ${model || "any"} | routing: ${routingOutcome.reason}`);
+    }
+    if (routingOutcome.blocked) {
+      log.warn("AUTH", `${provider} | ${model || "any"} | ${routingOutcome.reason}`);
+      return { allRateLimited: false, noEligibleAccount: true, lastError: routingOutcome.reason, lastErrorCode: "no_eligible_account" };
+    }
+
     // Per-provider strategy overrides global setting
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
     const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
@@ -141,18 +160,41 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     let connection;
     // Pin to preferred connection if specified and available
     if (preferredConnectionId) {
-      connection = availableConnections.find((c) => c.id === preferredConnectionId);
+      connection = eligibleConnections.find((c) => c.id === preferredConnectionId);
       if (connection) {
         log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
       }
     }
     if (connection) {
       // skip strategy
+    } else if (routingOutcome.strategy === "least-used") {
+      connection = [...eligibleConnections].sort((a, b) => {
+        if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
+        if (!a.lastUsedAt) return -1;
+        if (!b.lastUsedAt) return 1;
+        return new Date(a.lastUsedAt) - new Date(b.lastUsedAt);
+      })[0];
+    } else if (routingOutcome.strategy === "random") {
+      connection = eligibleConnections[Math.floor(Math.random() * eligibleConnections.length)];
+    } else if (routingOutcome.strategy === "fill-first") {
+      connection = eligibleConnections[0];
     } else if (strategy === "round-robin") {
-      const stickyLimit = providerOverride.stickyRoundRobinLimit || settings.stickyRoundRobinLimit || 3;
+      const stickyLimit = routingOutcome.stickyLimit
+        || providerOverride.stickyRoundRobinLimit
+        || settings.stickyRoundRobinLimit
+        || 3;
+
+      // Routing "prefer" acts as a soft partition: drain the preferred tier
+      // (e.g. free accounts) while any of its accounts is still eligible.
+      let rotationPool = eligibleConnections;
+      const { preferredIds } = routingOutcome;
+      if (preferredIds?.length > 0) {
+        const preferred = eligibleConnections.filter((c) => preferredIds.includes(c.id));
+        if (preferred.length > 0) rotationPool = preferred;
+      }
 
       // Sort by lastUsed (most recent first) to find current candidate
-      const byRecency = [...availableConnections].sort((a, b) => {
+      const byRecency = [...rotationPool].sort((a, b) => {
         if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
         if (!a.lastUsedAt) return 1;
         if (!b.lastUsedAt) return -1;
@@ -172,7 +214,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         });
       } else {
         // Pick the least recently used (excluding current if possible)
-        const sortedByOldest = [...availableConnections].sort((a, b) => {
+        const sortedByOldest = [...rotationPool].sort((a, b) => {
           if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
           if (!a.lastUsedAt) return -1;
           if (!b.lastUsedAt) return 1;
@@ -188,8 +230,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         });
       }
     } else {
-      // Default: fill-first (already sorted by priority in getProviderConnections)
-      connection = availableConnections[0];
+      // Default: fill-first. The router already front-loads the preferred tier,
+      // so index 0 respects "prefer" (free accounts) even under priority order.
+      connection = eligibleConnections[0];
     }
 
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});

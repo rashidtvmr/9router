@@ -1,6 +1,9 @@
-# v0.5.65 (2026-09-03)
+# Unreleased
 
 ## Features
+- **Account Routing**: custom model→account router (`/dashboard/account-routing`). Rules match providers+models (glob ok) and pick accounts by plan tier, tags, email domain, ID, or any `providerSpecificData` field. Paid-tier models can be locked to Plus/Team/Pro accounts, cheap models can drain free accounts first (`prefer`), a model can be pinned to or excluded from specific accounts, and rules can override the account selection strategy (fill-first, round robin, least-used, random) per model. Includes one-click presets, a dry-run explainer, `onEmpty: fail` mode, and routing honors each connection's `enabledModels` allowlist (previously only the model catalog read it). API: `GET/PATCH /api/account-routing`, `POST` for dry-run. Settings key: `accountRouting`.
+
+# v0.5.65 (2026-09-03)## Features
 - **Fetch**: add Ollama Cloud web fetch provider
 - **Gemini / Antigravity**: add Gemini 3.8 Flash support and bump IDE fingerprint to 2.11.0
 - **Claude**: add Claude Fable 5.1 support (adaptive thinking with `output_config.effort`), bump Claude Code fingerprint to 2.1.258 for new-model access
