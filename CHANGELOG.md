@@ -1,3 +1,9 @@
+# Unreleased
+
+## Features
+- **Model Routes** (`/dashboard/account-routing`): custom model-to-account router. API: `GET/PATCH /api/account-routing`, `POST` dry-run. Settings key: `accountRouting`.
+- **Codex**: add `gpt-6-astra-fast` to the model catalog (upstream added `gpt-6-astra` in v0.5.69).
+
 # v0.5.75 (2026-09-10)
 
 ## Features
