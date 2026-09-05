@@ -85,8 +85,8 @@ export const DEFAULT_ACCOUNT_ROUTING = { enabled: false, rules: [] };
 
 /**
  * One-click presets. `rules` are partials merged over DEFAULT_RULE.
- * The Codex pair is the canonical case: paid-only models must never burn a
- * free account slot, and cheap models should drain free accounts first.
+ * Served by the API for programmatic rule bootstrap; the dashboard wizard
+ * writes the simple id-in pin shape directly.
  */
 export const ROUTING_PRESETS = {
   "codex-paid-models": {

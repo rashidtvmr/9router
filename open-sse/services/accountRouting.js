@@ -14,7 +14,6 @@
 import {
   ACCOUNT_FIELDS,
   DEFAULT_RULE,
-  DEFAULT_ACCOUNT_ROUTING,
   UNKNOWN_PLAN_ELIGIBLE,
   ROUTING_STRATEGIES,
   ON_EMPTY_BEHAVIOURS,
@@ -116,7 +115,7 @@ const OPERATOR_FNS = {
  * silently widen access.
  */
 export function evaluateCondition(connection, condition) {
-  if (!condition?.field || !condition?.op) return false;
+  if (!condition || typeof condition !== "object" || !condition.field || !condition.op) return false;
   const fn = OPERATOR_FNS[condition.op];
   if (!fn) return false;
 
@@ -130,6 +129,10 @@ export function evaluateCondition(connection, condition) {
     (actual === undefined || actual === null || actual === "") &&
     !["empty", "exists", "neq", "nin"].includes(condition.op)
   ) {
+    return false;
+  }
+  // A regex/glob with no usable pattern can never match — fail closed.
+  if (["glob", "regex"].includes(condition.op) && (condition.value === undefined || condition.value === null || String(condition.value) === "")) {
     return false;
   }
   return fn(actual, condition.value);
@@ -149,23 +152,26 @@ export function matchesAny(connection, conditions) {
 
 /* ------------------------------------------------------------------- rules */
 
-/** Merge a persisted rule over DEFAULT_RULE so partial rules are always safe. */
+/** Merge a persisted rule over DEFAULT_RULE so partial rules are always safe. Never throws. */
 export function normalizeRule(rule = {}) {
+  const src = rule && typeof rule === "object" ? rule : {};
+  const pick = (obj, key, fallback) => (obj && typeof obj[key] === "object" && obj[key] !== null ? obj[key] : fallback);
   return {
     ...DEFAULT_RULE,
-    ...rule,
-    match: { ...DEFAULT_RULE.match, ...(rule.match || {}) },
-    select: { ...DEFAULT_RULE.select, ...(rule.select || {}) },
-    order: { ...DEFAULT_RULE.order, ...(rule.order || {}) },
-    onEmpty: ON_EMPTY_BEHAVIOURS[rule.onEmpty] ? rule.onEmpty : DEFAULT_RULE.onEmpty,
+    ...src,
+    match: { ...DEFAULT_RULE.match, ...pick(src, "match", {}) },
+    select: { ...DEFAULT_RULE.select, ...pick(src, "select", {}) },
+    order: { ...DEFAULT_RULE.order, ...pick(src, "order", {}) },
+    onEmpty: ON_EMPTY_BEHAVIOURS[src.onEmpty] ? src.onEmpty : DEFAULT_RULE.onEmpty,
   };
 }
 
 export function normalizeRouting(routing) {
-  const src = routing && typeof routing === "object" ? routing : DEFAULT_ACCOUNT_ROUTING;
+  const src = routing && typeof routing === "object" ? routing : {};
+  const rules = Array.isArray(src.rules) ? src.rules : [];
   return {
     enabled: src.enabled !== false,
-    rules: (Array.isArray(src.rules) ? src.rules : []).map(normalizeRule),
+    rules: rules.map((r) => normalizeRule(r)),
   };
 }
 
@@ -347,12 +353,15 @@ export function applyAccountRouting({ connections, providerId, model, routing } 
  */
 export function explainAccountRouting({ connections, providerId, model, routing } = {}) {
   const outcome = applyAccountRouting({ connections, providerId, model, routing });
-  const describe = (c) => ({
-    id: c.id,
-    name: c.displayName || c.name || c.email || c.id,
-    plan: resolveField(c, "plan") ?? null,
-    priority: c.priority ?? null,
-  });
+  const describe = (c) => {
+    const conn = c && typeof c === "object" ? c : {};
+    return {
+      id: conn.id,
+      name: conn.displayName || conn.name || conn.email || conn.id,
+      plan: resolveField(conn, "plan") ?? null,
+      priority: conn.priority ?? null,
+    };
+  };
   return {
     model: model || null,
     provider: providerId || null,

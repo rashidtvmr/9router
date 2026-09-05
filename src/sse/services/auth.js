@@ -138,12 +138,19 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     // Custom model→account routing: narrow the eligible set (plan tier, tags,
     // per-account allowlists, …) and optionally reorder/override strategy.
-    const routingOutcome = applyAccountRouting({
-      connections: availableConnections,
-      providerId,
-      model,
-      routing: settings.accountRouting,
-    });
+    // Fail-open like the rtk hooks: a routing crash must never take requests down.
+    let routingOutcome;
+    try {
+      routingOutcome = applyAccountRouting({
+        connections: availableConnections,
+        providerId,
+        model,
+        routing: settings.accountRouting,
+      });
+    } catch (routingError) {
+      log.warn("AUTH", `${provider} | account routing skipped (engine error: ${routingError?.message})`);
+      routingOutcome = { connections: availableConnections, applied: [], strategy: null, stickyLimit: null, preferredIds: [], fallbackIds: [], blocked: false, reason: null, filteredOut: [] };
+    }
     const eligibleConnections = routingOutcome.connections;
     if (routingOutcome.reason) {
       log.info("AUTH", `${provider} | ${model || "any"} | routing: ${routingOutcome.reason}`);

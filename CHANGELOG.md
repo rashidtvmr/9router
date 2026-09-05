@@ -1,7 +1,7 @@
 # Unreleased
 
 ## Features
-- **Account Routing**: custom model→account router (`/dashboard/account-routing`). Rules match providers+models (glob ok) and pick accounts by plan tier, tags, email domain, ID, or any `providerSpecificData` field. Paid-tier models can be locked to Plus/Team/Pro accounts, cheap models can drain free accounts first (`prefer`), a model can be pinned to or excluded from specific accounts, and rules can override the account selection strategy (fill-first, round robin, least-used, random) per model. Includes one-click presets, a dry-run explainer, `onEmpty: fail` mode, and routing honors each connection's `enabledModels` allowlist (previously only the model catalog read it). API: `GET/PATCH /api/account-routing`, `POST` for dry-run. Settings key: `accountRouting`.
+- **Model Routes** (`/dashboard/account-routing`): pick a provider → pick a model → pick the accounts allowed to serve it. A route (e.g. `gpt-5.6-sol` → your Plus accounts, `gpt-5.6-luna` → all accounts) narrows the eligible set per model; account fallback, cooldown locks, round-robin, token refresh, and combos keep working. Requests fail with a clear 403 rather than leaking to an unpinned account. Routing also honors each connection's `enabledModels` allowlist (previously only the model catalog read it), supports a `prefer` tier that drains e.g. free accounts first even under round-robin, and advanced rule shapes via `GET/PATCH /api/account-routing` (conditions on plan/tag/email/id/any `psd.*`, operators `eq/in/glob/regex/…`, per-rule strategy override, `onEmpty: fail`). Settings key: `accountRouting`.
 
 # v0.5.65 (2026-09-03)## Features
 - **Fetch**: add Ollama Cloud web fetch provider
