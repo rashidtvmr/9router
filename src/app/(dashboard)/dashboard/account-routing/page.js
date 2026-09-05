@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Card, Button, Modal, CardSkeleton, ConfirmModal, Toggle, Select } from "@/shared/components";
+import { useState, useEffect, useMemo } from "react";
+import { Card, Button, Modal, CardSkeleton, ConfirmModal, Toggle } from "@/shared/components";
 
 /**
  * Model Routes — simple model→account routing.
@@ -17,12 +17,65 @@ import { Card, Button, Modal, CardSkeleton, ConfirmModal, Toggle, Select } from 
  * serve a model.
  */
 
+/** Searchable select — native input + filtered list, keyboard-friendly, zero deps. */
+function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => String(o.label).toLowerCase().includes(q) || String(o.value).toLowerCase().includes(q));
+  }, [options, query]);
+
+  const selected = options.find((o) => o.value === value);
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => { setOpen(!open); setQuery(""); }}
+        className="w-full flex items-center justify-between gap-2 rounded-lg border border-border-base bg-surface px-3 py-2 text-sm text-text-main hover:border-primary/50 transition-colors"
+      >
+        <span className={selected ? "" : "text-text-muted"}>{selected ? selected.label : (placeholder || "Select...")}</span>
+        <span className="material-symbols-outlined text-text-muted text-[18px]">{open ? "expand_less" : "expand_more"}</span>
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 w-full rounded-lg border border-border-base bg-surface shadow-lg">
+          <div className="p-2 border-b border-border-base">
+            <input
+              autoFocus
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search..."
+              className="w-full px-2 py-1.5 bg-surface-hover border border-border rounded text-xs focus:outline-none focus:ring-1 focus:ring-primary/50"
+            />
+          </div>
+          <div className="max-h-56 overflow-y-auto p-1">
+            {filtered.length === 0 && <p className="text-xs text-text-muted px-2 py-3 text-center">{emptyHint || "No matches"}</p>}
+            {filtered.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => { onChange(o.value); setOpen(false); setQuery(""); }}
+                className={`w-full text-left px-2.5 py-1.5 rounded text-sm transition-colors ${o.value === value ? "bg-primary/10 text-primary" : "text-text-main hover:bg-surface-hover"}`}
+              >
+                {renderItem ? renderItem(o) : o.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function routeToDraft(route, providers) {
   const provider = providers.find((p) => p.id === route.match?.providers?.[0]) || null;
   const model = route.match?.models?.[0] || "";
   const cond = route.select?.include?.find((c) => c.field === "id" && c.op === "in");
   const accountIds = Array.isArray(cond?.value) ? cond.value : cond?.value ? [cond.value] : [];
-  return { provider, model, accountIds };
+  return { provider, model, accountIds, alias: route.alias || "" };
 }
 
 /** Only rules the wizard created (single id-in pin) are editable without loss. */
@@ -57,6 +110,7 @@ function draftToRule(draft, existing) {
     order: { prefer: [], strategy: "inherit", stickyLimit: null, reverse: false },
     onEmpty: existing?.onEmpty || "error",
     stopOnMatch: true,
+    alias: (draft.alias || "").trim(),
   };
 }
 
@@ -258,16 +312,14 @@ export default function AccountRoutingPage() {
             {/* Step 1 — provider */}
             <div>
               <p className="text-sm font-medium text-text-main mb-2">1. Provider</p>
-              <Select
+              <Combobox
                 value={draftProvider?.id || ""}
-                onChange={(e) => {
-                  const p = providers.find((x) => x.id === e.target.value) || null;
-                  setDraft({ ...draft, provider: p, model: "", accountIds: [] });
+                onChange={(id) => {
+                  const p = providers.find((x) => x.id === id) || null;
+                  setDraft({ ...draft, provider: p, model: "", accountIds: [], alias: editingRule?.alias || "" });
                 }}
-                options={[
-                  { value: "", label: "Select provider..." },
-                  ...providers.map((p) => ({ value: p.id, label: `${p.name} (${p.connectionCount} accounts)` })),
-                ]}
+                options={providers.map((p) => ({ value: p.id, label: `${p.name} (${p.connectionCount} accounts)` }))}
+                placeholder="Select provider..."
               />
             </div>
 
@@ -275,17 +327,35 @@ export default function AccountRoutingPage() {
             {draftProvider && (
               <div>
                 <p className="text-sm font-medium text-text-main mb-2">2. Model</p>
-                <Select
+                <Combobox
                   value={draft.model}
-                  onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-                  options={[
-                    { value: "", label: "Select model..." },
-                    ...draftProvider.models.map((m) => ({ value: m, label: m })),
-                  ]}
+                  onChange={(m) => setDraft({ ...draft, model: m })}
+                  options={draftProvider.models.map((m) => ({ value: m, label: m }))}
+                  placeholder="Select model..."
+                  emptyHint="No models listed for this provider"
                 />
                 {draftProvider.models.length === 0 && (
                   <p className="text-xs text-text-muted mt-1.5">No models listed for this provider — connect an account or add models first.</p>
                 )}
+              </div>
+            )}
+
+            {/* Optional: callable alias — exposes this route as its own model id */}
+            {draftProvider && draft.model && (
+              <div>
+                <p className="text-sm font-medium text-text-main mb-2">
+                  Route name <span className="text-text-muted font-normal">(optional — call this model by id from any client)</span>
+                </p>
+                <input
+                  type="text"
+                  value={draft.alias}
+                  onChange={(e) => setDraft({ ...draft, alias: e.target.value })}
+                  placeholder="e.g. sol-plus, team-fast"
+                  className="w-full rounded-lg border border-border-base bg-surface px-3 py-2 text-sm text-text-main focus:outline-none focus:ring-1 focus:ring-primary/50"
+                />
+                <p className="text-xs text-text-muted mt-1.5">
+                  Unique. Clients can request <span className="text-text-main">{draft.alias?.trim() || "<name>"}</span> directly — it routes to {draft.model} on the accounts below. Leave empty to keep the route internal.
+                </p>
               </div>
             )}
 

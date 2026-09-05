@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
-import { getSettings, updateSettings, getProviderConnections } from "@/lib/localDb";
-import { explainAccountRouting, normalizeRouting } from "open-sse/services/accountRouting.js";
+import {
+  getSettings,
+  updateSettings,
+  getProviderConnections,
+  getModelAliases,
+  setModelAlias,
+  deleteModelAlias,
+  getCombos,
+} from "@/lib/localDb";
+import { explainAccountRouting, normalizeRouting, normalizeRule } from "open-sse/services/accountRouting.js";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId } from "@/shared/constants/models";
 
@@ -32,6 +40,54 @@ function pickModelList(providerId, connections) {
     getModelsByProviderId(providerId).forEach((m) => ids.add(m.id));
   }
   return [...ids].sort();
+}
+
+/** A route alias must not shadow an existing model id, combo, alias, or provider prefix. */
+async function validateRouteAlias(alias, target, rules) {
+  const name = String(alias || "").trim();
+  if (!name) return null; // alias optional
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) {
+    return "Alias may only contain letters, numbers, dots, dashes, underscores";
+  }
+  if (name.includes("/")) return "Alias must not contain '/'";
+
+  const [aliases, combos] = await Promise.all([getModelAliases(), getCombos().catch(() => [])]);
+  if (combos?.some((c) => c.name === name)) return `Alias "${name}" is already a combo name`;
+  const otherRoute = (rules || []).find((r) => r.alias === name);
+  const targetModel = `${target.provider}/${target.model}`;
+  if (aliases[name] && aliases[name] !== targetModel && !otherRoute) {
+    return `Alias "${name}" is already used`;
+  }
+  // Provider prefixes are reserved (e.g. "cx", "codex", "openai")
+  if (AI_PROVIDERS[name]) return `"${name}" is a reserved provider name`;
+  return null;
+}
+
+/** Keep kv model aliases in sync with route.alias fields (create/update/delete). */
+async function syncRouteAliases(nextRules, prevRules) {
+  const nextByAlias = new Map();
+  for (const rule of nextRules) {
+    const alias = String(rule.alias || "").trim();
+    if (!alias) continue;
+    const provider = rule.match?.providers?.[0];
+    const model = rule.match?.models?.[0];
+    if (provider && model) nextByAlias.set(alias, `${provider}/${model}`);
+  }
+
+  const prevAliases = new Set((prevRules || []).map((r) => String(r.alias || "").trim()).filter(Boolean));
+
+  // Delete aliases removed from routes (only if we own them: they still point at the route's target)
+  const aliases = await getModelAliases();
+  for (const alias of prevAliases) {
+    if (!nextByAlias.has(alias)) {
+      await deleteModelAlias(alias).catch(() => {});
+    }
+  }
+  // Upsert current ones
+  for (const [alias, target] of nextByAlias.entries()) {
+    await setModelAlias(alias, target);
+  }
+  return nextByAlias;
 }
 
 export async function GET() {
@@ -75,8 +131,25 @@ export async function PATCH(request) {
     if (!body || typeof body !== "object" || !("accountRouting" in body)) {
       return NextResponse.json({ error: "Body must contain 'accountRouting'" }, { status: 400 });
     }
+    const settings = await getSettings();
+    const prevRules = normalizeRouting(settings.accountRouting).rules;
     const routing = normalizeRouting(body.accountRouting);
+    const rules = routing.rules.map((r) => normalizeRule(r));
+
+    // Validate every rule that requests a callable alias
+    for (const rule of rules) {
+      if (!rule.alias) continue;
+      const target = { provider: rule.match?.providers?.[0], model: rule.match?.models?.[0] };
+      const problem = await validateRouteAlias(rule.alias, target, rules);
+      if (problem) {
+        return NextResponse.json({ error: `Route "${rule.name || rule.id}": ${problem}` }, { status: 400 });
+      }
+    }
+
+    routing.rules = rules;
     await updateSettings({ accountRouting: routing });
+    await syncRouteAliases(rules, prevRules);
+
     return NextResponse.json({ accountRouting: routing }, { headers: RESPONSE_HEADERS });
   } catch (error) {
     console.log("Error saving account routing:", error);

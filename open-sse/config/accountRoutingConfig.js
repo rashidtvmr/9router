@@ -72,6 +72,7 @@ export const UNKNOWN_PLAN_ELIGIBLE = false;
 export const DEFAULT_RULE = {
   id: "",
   name: "",
+  alias: "",
   enabled: true,
   priority: 100,
   match: { providers: [], models: [], excludeModels: [] },
