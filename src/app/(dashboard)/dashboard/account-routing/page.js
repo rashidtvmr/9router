@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Card, Button, Modal, CardSkeleton, ConfirmModal, Toggle } from "@/shared/components";
 
 /**
@@ -21,6 +22,9 @@ import { Card, Button, Modal, CardSkeleton, ConfirmModal, Toggle } from "@/share
 function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState(null);
+  const btnRef = useRef(null);
+  const listRef = useRef(null);
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return options;
@@ -29,18 +33,54 @@ function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem
 
   const selected = options.find((o) => o.value === value);
 
+  const openMenu = () => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) setRect({ top: r.bottom + window.scrollY + 4, left: r.left + window.scrollX, width: r.width });
+    setQuery("");
+    setOpen(true);
+  };
+
+  // Outside-click + scroll-away close
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    const onDown = (e) => {
+      if (btnRef.current?.contains(e.target) || listRef.current?.contains(e.target)) return;
+      close();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("resize", close);
+    // Capture-phase scroll close — but never for scrolls INSIDE the menu
+    // itself (its option list scrolls). e.target is the scrolling element.
+    const onScroll = (e) => {
+      if (listRef.current && e.target instanceof Node && listRef.current.contains(e.target)) return;
+      close();
+    };
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open]);
+
   return (
     <div className="relative">
       <button
+        ref={btnRef}
         type="button"
-        onClick={() => { setOpen(!open); setQuery(""); }}
+        onClick={() => (open ? setOpen(false) : openMenu())}
         className="w-full flex items-center justify-between gap-2 rounded-lg border border-border-base bg-surface px-3 py-2 text-sm text-text-main hover:border-primary/50 transition-colors"
       >
         <span className={selected ? "" : "text-text-muted"}>{selected ? selected.label : (placeholder || "Select...")}</span>
         <span className="material-symbols-outlined text-text-muted text-[18px]">{open ? "expand_less" : "expand_more"}</span>
       </button>
-      {open && (
-        <div className="absolute z-20 mt-1 w-full rounded-lg border border-border-base bg-surface shadow-lg">
+      {open && rect && createPortal(
+        <div
+          ref={listRef}
+          style={{ position: "fixed", top: rect.top, left: rect.left, width: rect.width }}
+          className="z-50 rounded-lg border border-border-base bg-surface shadow-lg"
+        >
           <div className="p-2 border-b border-border-base">
             <input
               autoFocus
@@ -64,7 +104,8 @@ function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem
               </button>
             ))}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
