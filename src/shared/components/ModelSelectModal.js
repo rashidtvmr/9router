@@ -18,6 +18,19 @@ const PROVIDER_ORDER = [
 ];
 
 // Providers that need no auth — always show in model selector
+// Fuzzy subsequence: query chars appear in order ("gas" ~ "gpt-6-astra")
+function isSubsequence(needle, hay) {
+  let i = 0;
+  for (const ch of hay) {
+    if (ch === needle[i]) i++;
+    if (i === needle.length) return true;
+  }
+  return i === needle.length;
+}
+
+// A token matches when it is a substring OR a subsequence of the text.
+const tokenMatches = (token, text) => text.includes(token) || isSubsequence(token, text);
+
 const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
 
 export default function ModelSelectModal({
@@ -399,9 +412,12 @@ export default function ModelSelectModal({
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
     if (kindFilter || capFilter) return [];
-    if (!searchQuery.trim()) return combos;
-    const query = searchQuery.toLowerCase();
-    return combos.filter(c => c.name.toLowerCase().includes(query));
+    const tokens = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return combos;
+    return combos.filter((c) => {
+      const text = `${c.name} ${(c.models || []).join(" ")}`.toLowerCase();
+      return tokens.every((t) => tokenMatches(t, text));
+    });
   }, [combos, searchQuery, kindFilter]);
 
   // Sort models alphabetically, with added models floated to top
@@ -413,7 +429,7 @@ export default function ModelSelectModal({
 
   // Filter models by search query
   const filteredGroups = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
+    const tokens = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
 
     const filtered = {};
     Object.entries(groupedModels).forEach(([providerId, group]) => {
@@ -423,14 +439,20 @@ export default function ModelSelectModal({
         models = models.filter((m) => getCaps(m.value)?.[capFilter] === true);
         if (models.length === 0) return;
       }
-      if (query) {
-        const providerNameMatches = group.name.toLowerCase().includes(query);
-        models = models.filter(
-          (m) =>
-            m.name.toLowerCase().includes(query) ||
-            m.id.toLowerCase().includes(query)
-        );
-        if (models.length === 0 && !providerNameMatches) return;
+      if (tokens.length > 0) {
+        // Tokens may match the provider name, the model name, or the model id
+        // in any order ("codex astra", "gas", "astra fast"). When every token
+        // matches the provider itself, keep all its models.
+        const providerText = `${group.name} ${providerId}`.toLowerCase();
+        if (tokens.every((t) => tokenMatches(t, providerText))) {
+          filtered[providerId] = { ...group, models: sortModels(models) };
+          return;
+        }
+        models = models.filter((m) => {
+          const fullText = `${providerText} ${m.name} ${m.id}`.toLowerCase();
+          return tokens.every((t) => tokenMatches(t, fullText));
+        });
+        if (models.length === 0) return;
       }
       filtered[providerId] = {
         ...group,
