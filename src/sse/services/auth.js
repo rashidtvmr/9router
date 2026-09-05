@@ -75,30 +75,15 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         };
       }
 
-      // 2. Anonymous free tier: egress directly. Free quotas are keyed on the
-      //    connecting IP, so relay/worker proxies (shared egress IPs) are
-      //    blanket rate-limited upstream — only route through an explicitly
-      //    configured pool for this provider.
+      // 2. Anonymous free tier: egress DIRECTLY. Zen keys the free quota on
+      //    the connecting IP, and every relay/worker egress IP is blanket
+      //    rate-limited upstream (verified: even a paid key 429s through the
+      //    relay). A pool override pinned in settings is ignored here on
+      //    purpose — logging so the mismatch is discoverable.
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
-      const explicitPoolId = override.proxyPoolId || "";
-      if (explicitPoolId && explicitPoolId !== "__none__") {
-        const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: explicitPoolId });
-        if (resolvedProxy?.vercelRelayUrl || resolvedProxy?.connectionProxyEnabled) {
-          return {
-            id: "noauth",
-            connectionName: "Public",
-            isActive: true,
-            accessToken: "public",
-            providerSpecificData: {
-              connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
-              connectionProxyUrl: resolvedProxy.connectionProxyUrl,
-              connectionNoProxy: resolvedProxy.connectionNoProxy,
-              connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
-              vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
-            },
-          };
-        }
+      if (override.proxyPoolId && override.proxyPoolId !== "__none__") {
+        log.warn("AUTH", `${providerId} | free tier ignores proxy pool ${override.proxyPoolId}: zen throttles relay egress IPs; going direct`);
       }
       return {
         id: "noauth",
