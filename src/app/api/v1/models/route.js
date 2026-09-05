@@ -5,7 +5,7 @@ import {
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
+import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getSettings } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
@@ -304,6 +304,25 @@ export async function buildModelsList(kindFilter, options = {}) {
       entry.kind = combo.kind;
     }
     models.push(entry);
+  }
+
+  // Model routes (account-pinned models) — LLM kind, hidden from media-kind lists.
+  try {
+    const settings = await getSettings();
+    const routing = settings.accountRouting || {};
+    if (routing.enabled !== false && Array.isArray(routing.rules)) {
+      for (const rule of routing.rules) {
+        if (rule.enabled === false || !rule.alias) continue;
+        if (!comboMatchesKinds({ kind: LLM_KIND }, kindFilter)) continue;
+        models.push({
+          id: rule.alias,
+          object: "model",
+          owned_by: "route",
+        });
+      }
+    }
+  } catch (routeError) {
+    console.log("Could not fetch model routes:", routeError?.message);
   }
 
   if (connections.length === 0) {

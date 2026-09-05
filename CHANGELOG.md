@@ -1,6 +1,9 @@
-# v0.5.65 (2026-09-03)
+# Unreleased
 
 ## Features
+- **Model Routes** (`/dashboard/account-routing`): pick a provider → pick a model → pick the accounts allowed to serve it. A route (e.g. `gpt-5.6-sol` → your Plus accounts, `gpt-5.6-luna` → all accounts) narrows the eligible set per model; account fallback, cooldown locks, round-robin, token refresh, and combos keep working. Requests fail with a clear 403 rather than leaking to an unpinned account. Routing also honors each connection's `enabledModels` allowlist (previously only the model catalog read it), supports a `prefer` tier that drains e.g. free accounts first even under round-robin, and advanced rule shapes via `GET/PATCH /api/account-routing` (conditions on plan/tag/email/id/any `psd.*`, operators `eq/in/glob/regex/…`, per-rule strategy override, `onEmpty: fail`). Settings key: `accountRouting`.
+
+# v0.5.65 (2026-09-03)## Features
 - **Fetch**: add Ollama Cloud web fetch provider
 - **Gemini / Antigravity**: add Gemini 3.8 Flash support and bump IDE fingerprint to 2.11.0
 - **Claude**: add Claude Fable 5.1 support (adaptive thinking with `output_config.effort`), bump Claude Code fingerprint to 2.1.258 for new-model access

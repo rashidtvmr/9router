@@ -59,6 +59,7 @@ export default function ModelSelectModal({
   const { getCaps } = useModelCaps();
   const [searchQuery, setSearchQuery] = useState("");
   const [combos, setCombos] = useState([]);
+  const [routes, setRoutes] = useState([]);
   const [providerNodes, setProviderNodes] = useState([]);
   const [customModels, setCustomModels] = useState([]);
   const [disabledModels, setDisabledModels] = useState({});
@@ -119,6 +120,25 @@ export default function ModelSelectModal({
 
   useEffect(() => {
     if (isOpen) fetchCombos();
+  }, [isOpen]);
+
+  // Model routes (account-pinned models) — surfaced like combos so client
+  // tools can pick "the paid-tier route" as one model.
+  const fetchRoutes = async () => {
+    try {
+      const res = await fetch("/api/account-routing", { cache: "no-store" });
+      if (!res.ok) throw new Error(`Failed to fetch routes: ${res.status}`);
+      const data = await res.json();
+      const rules = data.accountRouting?.rules || [];
+      setRoutes(rules.filter((r) => r.enabled && r.alias && r.match?.providers?.[0] && r.match?.models?.[0]));
+    } catch (error) {
+      console.error("Error fetching routes:", error);
+      setRoutes([]);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) fetchRoutes();
   }, [isOpen]);
 
   const fetchProviderNodes = async () => {
@@ -420,6 +440,19 @@ export default function ModelSelectModal({
     });
   }, [combos, searchQuery, kindFilter]);
 
+  // Model routes are LLM models pinned to specific accounts — same visibility
+  // rules as combos (hidden when a media-kind filter is active).
+  const filteredRoutes = useMemo(() => {
+    if (kindFilter || capFilter) return [];
+    if (!searchQuery.trim()) return routes;
+    const query = searchQuery.toLowerCase();
+    return routes.filter(
+      (r) =>
+        (r.alias || "").toLowerCase().includes(query) ||
+        (r.match?.models?.[0] || "").toLowerCase().includes(query)
+    );
+  }, [routes, searchQuery, kindFilter]);
+
   // Sort models alphabetically, with added models floated to top
   const sortModels = (models) => {
     const added = models.filter(m => addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
@@ -515,7 +548,46 @@ export default function ModelSelectModal({
 
       {/* Models grouped by provider - compact */}
       <div className="max-h-[400px] overflow-y-auto space-y-3">
-        {/* Combos section - always first */}
+        {/* Model routes section — pinned-account models, first like combos */}
+        {filteredRoutes.length > 0 && (
+          <div>
+            <div className="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-surface py-0.5">
+              <span className="material-symbols-outlined text-primary text-[14px]">alt_route</span>
+              <span className="text-xs font-medium text-primary">Model Routes</span>
+              <span className="text-[10px] text-text-muted">({filteredRoutes.length})</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {filteredRoutes.map((route) => {
+                const value = route.alias;
+                const isSelected = selectedModel === value;
+                const isAdded = addedModelValues.includes(value);
+                return (
+                  <button
+                    key={route.id}
+                    onClick={() => handleSelect({ id: value, name: value, value })}
+                    title={`Routes to ${route.match?.models?.[0]} on the accounts pinned for it`}
+                    className={`
+                      px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer flex items-center gap-1
+                      ${isSelected
+                        ? "bg-primary text-white border-primary"
+                        : isAdded
+                          ? "bg-primary border-primary text-white hover:bg-primary-hover"
+                          : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
+                      }
+                    `}
+                  >
+                    {(isAdded || isSelected) && (
+                      <span className="material-symbols-outlined leading-none" style={{ fontSize: "10px" }}>check</span>
+                    )}
+                    {value}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Combos section */}
         {filteredCombos.length > 0 && (
           <div>
             <div className="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-surface py-0.5">

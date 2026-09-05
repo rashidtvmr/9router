@@ -234,7 +234,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
 
     // All accounts unavailable
-    if (!credentials || credentials.allRateLimited) {
+    if (!credentials || credentials.allRateLimited || credentials.noEligibleAccount) {
+      if (credentials?.noEligibleAccount) {
+        const errorMsg = credentials.lastError || "No eligible account for this model";
+        log.warn("CHAT", `[${provider}/${model}] ${errorMsg}`);
+        return errorResponse(HTTP_STATUS.FORBIDDEN, `[${provider}/${model}] ${errorMsg}`);
+      }
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
