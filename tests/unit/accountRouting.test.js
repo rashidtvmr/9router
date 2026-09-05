@@ -254,6 +254,12 @@ describe("accountRouting: normalization", () => {
     expect(r.rules[0].match.providers).toEqual([]);
     expect(normalizeRouting(null).rules).toEqual([]);
   });
+
+  it("carries the optional callable alias through normalization", () => {
+    const r = normalizeRouting({ rules: [{ alias: "sol-plus", match: { providers: ["codex"], models: ["gpt-5.6-sol"] } }] });
+    expect(r.rules[0].alias).toBe("sol-plus");
+    expect(r.rules[0].enabled).toBe(true);
+  });
 });
 
 describe("accountRouting: never throws on malformed persisted data", () => {
