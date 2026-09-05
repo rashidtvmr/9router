@@ -255,3 +255,83 @@ describe("accountRouting: normalization", () => {
     expect(normalizeRouting(null).rules).toEqual([]);
   });
 });
+
+describe("accountRouting: never throws on malformed persisted data", () => {
+  const accounts = [conn("a", "plus"), conn("b", "free")];
+
+  it("survives null/garbage rule entries", () => {
+    const routing = { enabled: true, rules: [null, "junk", { id: "partial" }] };
+    const out = applyAccountRouting({ connections: accounts, providerId: "codex", model: "gpt-5.6-sol", routing });
+    expect(out.connections).toHaveLength(2); // partial rule matches nothing, falls through
+  });
+
+  it("survives non-object routing, garbage connections, and null models", () => {
+    expect(() => applyAccountRouting({ connections: [null, "x"], providerId: "codex", model: null, routing: "junk" })).not.toThrow();
+    expect(() => applyAccountRouting({ connections: [null], providerId: null, model: 42, routing: {} })).not.toThrow();
+    expect(() => explainAccountRouting({ connections: [null, undefined], providerId: "codex", model: "m", routing: null })).not.toThrow();
+  });
+
+  it("a rule with a broken include condition widens to all accounts (fail-open) under fallthrough", () => {
+    const routing = {
+      enabled: true,
+      rules: [{ match: { providers: ["codex"], models: ["*"] }, select: { include: [{ op: "bogus" }] }, onEmpty: "fallthrough" }],
+    };
+    const out = applyAccountRouting({ connections: accounts, providerId: "codex", model: "gpt-5.6-sol", routing });
+    expect(out.connections).toHaveLength(2);
+  });
+});
+
+describe("accountRouting: wizard pin shape (dashboard writes this)", () => {
+  const accounts = [conn("a", "free"), conn("b", "plus"), conn("c", "team")];
+
+  const pin = (ids, model = "gpt-5.6-sol") => ({
+    enabled: true,
+    rules: [{
+      name: model,
+      match: { providers: ["codex"], models: [model] },
+      select: { include: [{ field: "id", op: "in", value: ids }] },
+      onEmpty: "error",
+    }],
+  });
+
+  it("narrows to exactly the picked connection ids", () => {
+    const out = applyAccountRouting({ connections: accounts, providerId: "codex", model: "gpt-5.6-sol", routing: pin(["b", "c"]) });
+    expect(out.connections.map((x) => x.id).sort()).toEqual(["b", "c"]);
+    expect(out.blocked).toBe(false);
+  });
+
+  it("no picked id available → blocked, never widens", () => {
+    const out = applyAccountRouting({ connections: accounts, providerId: "codex", model: "gpt-5.6-sol", routing: pin(["zzz"]) });
+    expect(out.blocked).toBe(true);
+    expect(out.connections).toHaveLength(0);
+  });
+
+  it("string (non-array) condition value still pins correctly", () => {
+    const out = applyAccountRouting({ connections: accounts, providerId: "codex", model: "gpt-5.6-sol", routing: pin("b") });
+    expect(out.connections.map((x) => x.id)).toEqual(["b"]);
+  });
+
+  it("two routes for the same model stop at the first (stopOnMatch default)", () => {
+    const routing = {
+      enabled: true,
+      rules: [
+        { name: "r1", priority: 10, match: { providers: ["codex"], models: ["gpt-5.6-sol"] }, select: { include: [{ field: "id", op: "in", value: ["a"] }] }, onEmpty: "error" },
+        { name: "r2", priority: 20, match: { providers: ["codex"], models: ["gpt-5.6-sol"] }, select: { include: [{ field: "id", op: "in", value: ["b"] }] }, onEmpty: "error" },
+      ],
+    };
+    const out = applyAccountRouting({ connections: accounts, providerId: "codex", model: "gpt-5.6-sol", routing });
+    expect(out.applied.map((r) => r.name)).toEqual(["r1"]);
+    expect(out.connections.map((x) => x.id)).toEqual(["a"]);
+  });
+});
+
+describe("accountRouting: enabledModels edge shapes allow all", () => {
+  it("string / null enabledModels and null model are vacuously allowed", () => {
+    const c1 = conn("a", "plus", { psd: { enabledModels: "gpt-5.6-sol" } }); // string, not array
+    const c2 = conn("b", "plus", { psd: { enabledModels: null } });
+    expect(respectsEnabledModels(c1, "gpt-5.6-sol")).toBe(true); // non-array = no restriction
+    expect(respectsEnabledModels(c2, "anything")).toBe(true);
+    const strict = conn("c", "plus", { psd: { enabledModels: ["gpt-5.6-sol"] } });
+    expect(respectsEnabledModels(strict, null)).toBe(true); // no model in context (credential probe)
+  });
+});

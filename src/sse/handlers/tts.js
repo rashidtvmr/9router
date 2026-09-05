@@ -87,7 +87,11 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language, st
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
 
-    if (!credentials || credentials.allRateLimited) {
+    if (!credentials || credentials.allRateLimited || credentials.noEligibleAccount) {
+      if (credentials?.noEligibleAccount) {
+        const msg = credentials.lastError || "No eligible account for this model";
+        return errorResponse(HTTP_STATUS.FORBIDDEN, msg);
+      }
       if (credentials?.allRateLimited) {
         const msg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
