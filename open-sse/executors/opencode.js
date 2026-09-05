@@ -102,9 +102,17 @@ export class OpenCodeExecutor extends BaseExecutor {
     const downstreamUa = lower["user-agent"] || "";
     const isOpencodeDownstream = downstreamUa.toLowerCase().includes("opencode");
 
+    // Keyed connections (real API key) get keyed quota upstream; anonymous
+    // free tier rides the "public" token.
+    const apiKey = typeof credentials?.accessToken === "string"
+      && credentials.accessToken.trim() !== ""
+      && credentials.accessToken !== "public"
+      ? credentials.accessToken
+      : "public";
+
     return {
       "Content-Type": "application/json",
-      "Authorization": "Bearer public",
+      "Authorization": `Bearer ${apiKey}`,
       "User-Agent": isOpencodeDownstream ? downstreamUa : OPENCODE_UA,
       "x-opencode-client": lower["x-opencode-client"] || "desktop",
       "x-opencode-session": lower["x-opencode-session"] || this._currentSessionId || generateSessionId(),

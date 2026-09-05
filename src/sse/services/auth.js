@@ -1,5 +1,5 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
-import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
@@ -44,28 +44,67 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
     if (FREE_PROVIDERS[providerId]?.noAuth) {
+      // 1. Prefer a real connection: an account with an API key gets keyed
+      //    quota upstream (not IP-throttled), which survives shared egress IPs.
+      const keyed = await getProviderConnections({ provider: providerId, isActive: true });
+      const withKey = keyed.filter((c) => {
+        if (excludeSet.has(c.id)) return false;
+        const key = c?.apiKey || c?.providerSpecificData?.apiKey;
+        return typeof key === "string" && key.trim() !== "" && key !== "public";
+      });
+      if (withKey.length > 0) {
+        const picked = withKey[Math.floor(Math.random() * withKey.length)];
+        const resolvedProxy = await resolveConnectionProxyConfig(picked.providerSpecificData || {});
+        return {
+          authType: picked.authType,
+          apiKey: picked.apiKey,
+          accessToken: picked.apiKey,
+          id: picked.id,
+          connectionId: picked.id,
+          connectionName: picked.displayName || picked.name || picked.email || picked.id,
+          isActive: true,
+          providerSpecificData: {
+            ...(picked.providerSpecificData || {}),
+            connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
+            connectionProxyUrl: resolvedProxy.connectionProxyUrl,
+            connectionNoProxy: resolvedProxy.connectionNoProxy,
+            connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
+            vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+          },
+        };
+      }
+
+      // 2. Anonymous free tier: egress directly. Free quotas are keyed on the
+      //    connecting IP, so relay/worker proxies (shared egress IPs) are
+      //    blanket rate-limited upstream — only route through an explicitly
+      //    configured pool for this provider.
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
-      const strategy = override.rotateStrategy || "none";
-      let pickedId = override.proxyPoolId || null;
-      if (strategy !== "none") {
-        const allPools = await getProxyPools({ isActive: true });
-        const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
-        pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+      const explicitPoolId = override.proxyPoolId || "";
+      if (explicitPoolId && explicitPoolId !== "__none__") {
+        const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: explicitPoolId });
+        if (resolvedProxy?.vercelRelayUrl || resolvedProxy?.connectionProxyEnabled) {
+          return {
+            id: "noauth",
+            connectionName: "Public",
+            isActive: true,
+            accessToken: "public",
+            providerSpecificData: {
+              connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
+              connectionProxyUrl: resolvedProxy.connectionProxyUrl,
+              connectionNoProxy: resolvedProxy.connectionNoProxy,
+              connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
+              vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+            },
+          };
+        }
       }
-      const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
       return {
         id: "noauth",
         connectionName: "Public",
         isActive: true,
         accessToken: "public",
-        providerSpecificData: {
-          connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
-          connectionProxyUrl: resolvedProxy.connectionProxyUrl,
-          connectionNoProxy: resolvedProxy.connectionNoProxy,
-          connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
-          vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
-        },
+        providerSpecificData: {},
       };
     }
 
