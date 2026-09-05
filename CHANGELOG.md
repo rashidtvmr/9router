@@ -1,9 +1,33 @@
 # Unreleased
 
+
 ## Features
 - **Model Routes** (`/dashboard/account-routing`): pick a provider → pick a model → pick the accounts allowed to serve it. A route (e.g. `gpt-5.6-sol` → your Plus accounts, `gpt-5.6-luna` → all accounts) narrows the eligible set per model; account fallback, cooldown locks, round-robin, token refresh, and combos keep working. Requests fail with a clear 403 rather than leaking to an unpinned account. Routing also honors each connection's `enabledModels` allowlist (previously only the model catalog read it), supports a `prefer` tier that drains e.g. free accounts first even under round-robin, and advanced rule shapes via `GET/PATCH /api/account-routing` (conditions on plan/tag/email/id/any `psd.*`, operators `eq/in/glob/regex/…`, per-rule strategy override, `onEmpty: fail`). Settings key: `accountRouting`.
 
-# v0.5.65 (2026-09-03)## Features
+# v0.5.69 (2026-09-05)
+
+## Features
+- **Codex**: add GPT 6.0 Astra (`gpt-6-astra`) with vision, thinking and search capabilities
+- **Usage**: add Claude Fable quota tracker support with weekly window normalization (`weekly fable (7d)`)
+- **Dashboard**: group Antigravity Gemini and Claude quotas in Quota Tracker, prune stale hidden keys
+- **OpenCode Go**: add `muse-spark-1.3-contributor` model and support parallel tool calls on Responses path (#3819)
+- **Providers & Models**: align CodeBuddy-CN catalog/capabilities with server config; add GPT-5.6 Sol, Terra, Luna image aliases on Codex (#3806); refresh Qoder catalog with capability mapping and image pass-through
+- **CLI tools**: replace Copilot MITM with VS Code extension setup guide
+- **Gemini**: persist and replay `thoughtSignature` scoped by session namespace
+
+## Fixes
+- **Claude**: normalize adaptive auto effort (`output_config.effort`) (#3792)
+- **Antigravity**: prevent Google anti-abuse rate limits during multi-account refresh (#3813)
+- **Anthropic-compatible**: forward Claude beta flags to nodes fronting Anthropic (#3797)
+- **Dashboard**: dynamic mode label for local/remote detection (#3801)
+- **Codex**: format reset credit API errors cleanly (#3778)
+- **Security**: guard cowork MCP tools probe against SSRF (#3783)
+- **OpenCode Go**: track OpenCode Go quota (#3791) and send stable session headers (#3800)
+- **Logger**: suppress noisy background token refresh logs
+- **CLI**: export packed `.tgz` directly into workspace root instead of parent directory
+# v0.5.65 (2026-09-03)
+
+## Features
 - **Fetch**: add Ollama Cloud web fetch provider
 - **Gemini / Antigravity**: add Gemini 3.8 Flash support and bump IDE fingerprint to 2.11.0
 - **Claude**: add Claude Fable 5.1 support (adaptive thinking with `output_config.effort`), bump Claude Code fingerprint to 2.1.258 for new-model access
