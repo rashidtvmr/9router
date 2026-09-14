@@ -1,9 +1,17 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { cn } from "@/shared/utils/cn";
 import Button from "./Button";
 import Tooltip from "./Tooltip";
+
+// All keyboard-reachable elements inside a container, in visual order.
+function getFocusable(container) {
+  if (!container) return [];
+  return [...container.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )].filter((el) => el.offsetParent !== null || el === document.activeElement);
+}
 
 export default function Modal({
   isOpen,
@@ -16,6 +24,8 @@ export default function Modal({
   showTrafficLights = true,
   className,
 }) {
+  const dialogRef = useRef(null);
+  const previouslyFocusedRef = useRef(null);
   const sizes = {
     sm: "max-w-sm",
     md: "max-w-md",
@@ -33,6 +43,57 @@ export default function Modal({
     return () => { document.body.style.overflow = ""; };
   }, [isOpen]);
 
+  // Move focus into the dialog on open and restore it to the trigger on close.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    previouslyFocusedRef.current = document.activeElement;
+
+    // Focus the first sensible element: the first focusable, else the dialog.
+    const dialog = dialogRef.current;
+    if (dialog) {
+      const focusables = getFocusable(dialog);
+      (focusables[0] || dialog).focus();
+    }
+
+    const restore = () => {
+      const el = previouslyFocusedRef.current;
+      if (el && typeof el.focus === "function" && document.contains(el)) el.focus();
+      previouslyFocusedRef.current = null;
+    };
+    return restore;
+  }, [isOpen]);
+
+  // Focus trap: Tab cycles inside the dialog; also closes on overlay click
+  // via keyboard users reaching elements only inside the dialog.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusables = getFocusable(dialog);
+      if (focusables.length === 0) {
+        e.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || active === dialog) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || active === dialog) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [isOpen]);
+
   useEffect(() => {
     const handleEscape = (e) => {
       if (e.key === "Escape" && isOpen) onClose();
@@ -42,6 +103,11 @@ export default function Modal({
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
+
+  const dialogId =
+    typeof title === "string"
+      ? `modal-title-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+      : "modal";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -53,8 +119,13 @@ export default function Modal({
 
       {/* Modal content */}
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={title ? dialogId : undefined}
+        tabIndex={-1}
         className={cn(
-          "relative w-full bg-surface",
+          "relative w-full bg-surface outline-none",
           "border border-border-subtle",
           "rounded-[14px] shadow-[var(--shadow-elev)]",
           "fade-in",
@@ -84,7 +155,7 @@ export default function Modal({
                 </div>
               )}
               {title && (
-                <h2 className="text-lg font-semibold text-text-main">{title}</h2>
+                <h2 id={dialogId} className="text-lg font-semibold text-text-main">{title}</h2>
               )}
             </div>
             {/* X button — mobile only */}
