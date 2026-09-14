@@ -82,6 +82,38 @@ export function filterToOpenAIFormat(body, opts = {}) {
     delete body.tools;
   }
 
+  // Sanitize tool descriptions before normalization.
+  // Some upstreams (MiniMax, OpenRouter-backed deployments) reject a tool whose
+  // function.description is empty/null/non-string/over-length with
+  // "Invalid value for 'tools.N.function.description'". OpenAI-format tools pass
+  // through the normalization below untouched, so sanitize here for every shape.
+  const MAX_TOOL_DESC_CHARS = 1024;
+  if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
+    const sanitizeDesc = (raw) => {
+      if (typeof raw !== "string" || raw.trim() === "") return "No description provided";
+      // Strip control chars except tab/newline/carriage return, collapse, cap length
+      const cleaned = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").trim();
+      if (!cleaned) return "No description provided";
+      return cleaned.length > MAX_TOOL_DESC_CHARS ? cleaned.slice(0, MAX_TOOL_DESC_CHARS) : cleaned;
+    };
+    for (const tool of body.tools) {
+      // OpenAI format
+      if (tool?.function) {
+        tool.function.description = sanitizeDesc(tool.function.description);
+      }
+      // Claude format: {name, description, input_schema}
+      else if (tool && typeof tool === "object" && "description" in tool) {
+        tool.description = sanitizeDesc(tool.description);
+      }
+      // Gemini format: {functionDeclarations: [{name, description, parameters}]}
+      else if (tool?.functionDeclarations && Array.isArray(tool.functionDeclarations)) {
+        for (const fn of tool.functionDeclarations) {
+          if (fn) fn.description = sanitizeDesc(fn.description);
+        }
+      }
+    }
+  }
+
   // Normalize tools to OpenAI format (from Claude, Gemini, etc.)
   if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
     body.tools = body.tools.map(tool => {
