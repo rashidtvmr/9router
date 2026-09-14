@@ -84,6 +84,13 @@ const getPageInfo = (pathname) => {
       icon: "layers",
       breadcrumbs: [],
     };
+  if (pathname.includes("/account-routing"))
+    return {
+      title: "Account Routing",
+      description: "Route models to specific accounts by plan tier, tags, or allowlist",
+      icon: "alt_route",
+      breadcrumbs: [],
+    };
   if (pathname.includes("/usage"))
     return {
       title: "Usage & Analytics",

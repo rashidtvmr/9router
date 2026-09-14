@@ -1,7 +1,8 @@
 // Re-export from open-sse with localDb integration
-import { getModelAliases, getComboByName, getProviderNodes } from "@/lib/localDb";
+import { getModelAliases, getComboByName, getProviderNodes, getProviderConnections } from "@/lib/localDb";
 import { parseModel as parseModelCore, resolveModelAliasFromMap, getModelInfoCore } from "open-sse/services/model.js";
 import REGISTRY from "open-sse/providers/registry/index.js";
+import { PROVIDER_MODELS as MODELS } from "open-sse/config/providerModels.js";
 
 // Local provider alias overrides (HMR-friendly, applied on top of open-sse map)
 const LOCAL_PROVIDER_ALIASES = {
@@ -75,7 +76,40 @@ export async function getModelInfo(modelStr) {
     return { provider: null, model: parsed.model };
   }
 
+  const connectedFallback = await preferConnectedProviderForBareModel(modelStr);
+  if (connectedFallback) return connectedFallback;
+
   return getModelInfoCore(modelStr, getModelAliases);
+}
+
+/**
+ * Connection-aware fallback for bare model names (e.g. "gpt-6-astra").
+ * The core resolver would infer "openai" from the gpt- prefix — useless when
+ * no openai credentials exist. Instead, prefer a provider that actually lists
+ * the model in its catalog and has active connections. Returns null when the
+ * core resolution is good enough.
+ */
+async function preferConnectedProviderForBareModel(modelStr) {
+  const parsed = parseModel(modelStr);
+  if (!parsed?.isAlias) return null;
+  const resolved = await resolveModelAlias(parsed.model);
+  if (resolved) return null; // a real alias exists — no fallback needed
+  if (await getComboByName(parsed.model)) return null; // combos handled upstream
+
+  const [connections] = await Promise.all([getProviderConnections({ isActive: true })]);
+  const candidates = new Set((connections || []).map((c) => c.provider));
+  if (candidates.size === 0) return null;
+
+  for (const [providerAlias, models] of Object.entries(MODELS)) {
+    if (!models?.some((m) => m.id === parsed.model)) continue;
+    for (const entry of REGISTRY) {
+      const ids = [entry.id, entry.alias, ...(entry.aliases || [])].filter(Boolean);
+      if (ids.includes(providerAlias) && ids.some((id) => candidates.has(id))) {
+        return { provider: ids.find((id) => candidates.has(id)), model: parsed.model };
+      }
+    }
+  }
+  return null;
 }
 
 /**

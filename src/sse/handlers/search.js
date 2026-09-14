@@ -176,7 +176,11 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
       }
     }
 
-    if (!credentials || credentials.allRateLimited) {
+    if (!credentials || credentials.allRateLimited || credentials.noEligibleAccount) {
+      if (credentials?.noEligibleAccount) {
+        const msg = credentials.lastError || "No eligible account for this model";
+        return errorResponse(HTTP_STATUS.FORBIDDEN, msg);
+      }
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
