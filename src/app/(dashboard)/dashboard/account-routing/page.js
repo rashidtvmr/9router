@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { Card, Button, Modal, CardSkeleton, ConfirmModal, Toggle } from "@/shared/components";
 
 /**
- * Model Routes — simple model→account routing.
+ * Model Routes - simple model->account routing.
  *
  * Three steps, one card per route:
  *   1. pick a provider you have accounts for
@@ -14,12 +14,12 @@ import { Card, Button, Modal, CardSkeleton, ConfirmModal, Toggle } from "@/share
  *
  * Example: gpt-5.6-sol → your 5 Plus accounts; gpt-5.6-luna → all 20 accounts.
  * Everything else (caching, combos, fallback, modelLock cooldowns, token
- * refresh) keeps working untouched — a route only narrows which accounts may
+ * refresh) keeps working untouched - a route only narrows which accounts may
  * serve a model.
  */
 
-/** Searchable select — native input + filtered list, keyboard-friendly, zero deps. */
-function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem }) {
+/** Searchable select - native input + filtered list, keyboard-friendly, zero deps. */
+function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem, allowCustom }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [rect, setRect] = useState(null);
@@ -32,6 +32,11 @@ function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem
   }, [options, query]);
 
   const selected = options.find((o) => o.value === value);
+  const trimmedQuery = query.trim();
+  const hasExactMatch = options.some(
+    (o) => o.value.toLowerCase() === trimmedQuery.toLowerCase() || o.label.toLowerCase() === trimmedQuery.toLowerCase()
+  );
+  const showCustomOption = allowCustom && trimmedQuery && !hasExactMatch;
 
   const openMenu = () => {
     const r = btnRef.current?.getBoundingClientRect();
@@ -50,7 +55,7 @@ function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem
     };
     window.addEventListener("mousedown", onDown);
     window.addEventListener("resize", close);
-    // Capture-phase scroll close — but never for scrolls INSIDE the menu
+    // Capture-phase scroll close - but never for scrolls INSIDE the menu
     // itself (its option list scrolls). e.target is the scrolling element.
     const onScroll = (e) => {
       if (listRef.current && e.target instanceof Node && listRef.current.contains(e.target)) return;
@@ -72,7 +77,9 @@ function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem
         onClick={() => (open ? setOpen(false) : openMenu())}
         className="w-full flex items-center justify-between gap-2 rounded-lg border border-border-base bg-surface px-3 py-2 text-sm text-text-main hover:border-primary/50 transition-colors"
       >
-        <span className={selected ? "" : "text-text-muted"}>{selected ? selected.label : (placeholder || "Select...")}</span>
+        <span className={selected || value ? "" : "text-text-muted"}>
+          {selected ? selected.label : value || placeholder || "Select..."}
+        </span>
         <span className="material-symbols-outlined text-text-muted text-[18px]">{open ? "expand_less" : "expand_more"}</span>
       </button>
       {open && rect && createPortal(
@@ -87,12 +94,23 @@ function Combobox({ value, options, onChange, placeholder, emptyHint, renderItem
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search..."
+              placeholder="Search or type..."
               className="w-full px-2 py-1.5 bg-surface-hover border border-border rounded text-xs focus:outline-none focus:ring-1 focus:ring-primary/50"
             />
           </div>
           <div className="max-h-56 overflow-y-auto p-1">
-            {filtered.length === 0 && <p className="text-xs text-text-muted px-2 py-3 text-center">{emptyHint || "No matches"}</p>}
+            {showCustomOption && (
+              <button
+                type="button"
+                onClick={() => { onChange(trimmedQuery); setOpen(false); setQuery(""); }}
+                className="w-full text-left px-2.5 py-1.5 rounded text-sm text-primary font-medium hover:bg-surface-hover border-b border-border-base mb-1"
+              >
+                + Use &ldquo;{trimmedQuery}&rdquo;
+              </button>
+            )}
+            {filtered.length === 0 && !showCustomOption && (
+              <p className="text-xs text-text-muted px-2 py-3 text-center">{emptyHint || "No matches"}</p>
+            )}
             {filtered.map((o) => (
               <button
                 key={o.value}
@@ -132,10 +150,11 @@ function isWizardRule(route) {
 
 function draftToRule(draft, existing) {
   const accountIds = draft.accountIds;
+  const alias = (draft.alias || "").trim();
   return {
     ...(existing || {}),
     id: existing?.id || `route_${crypto.randomUUID().slice(0, 8)}`,
-    name: draft.model,
+    name: alias || draft.model,
     enabled: existing?.enabled ?? true,
     priority: existing?.priority ?? 100,
     match: {
@@ -151,7 +170,7 @@ function draftToRule(draft, existing) {
     order: { prefer: [], strategy: "inherit", stickyLimit: null, reverse: false },
     onEmpty: existing?.onEmpty || "error",
     stopOnMatch: true,
-    alias: (draft.alias || "").trim(),
+    alias,
   };
 }
 
@@ -204,6 +223,18 @@ export default function AccountRoutingPage() {
 
   const saveDraft = async () => {
     if (!draft?.provider || !draft.model?.trim()) return alert("Pick a provider and a model");
+    const alias = (draft.alias || "").trim();
+    if (!alias) return alert("Routed Model ID is required");
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(alias)) {
+      return alert("Routed Model ID may only contain letters, numbers, dots, dashes, and underscores");
+    }
+    if (alias.includes("/")) return alert("Routed Model ID must not contain '/'");
+    const duplicate = routing.rules.find(
+      (r) => r.id !== editingRule?.id && String(r.alias || "").trim().toLowerCase() === alias.toLowerCase()
+    );
+    if (duplicate) {
+      return alert(`Routed Model ID "${alias}" is already used by another route`);
+    }
     if (draft.accountIds.length === 0) return alert("Pick at least one account");
     const rule = draftToRule(draft, editingRule);
     const exists = routing.rules.some((r) => r.id === rule.id);
@@ -287,7 +318,12 @@ export default function AccountRoutingPage() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <p className="font-medium text-text-main truncate">{model}</p>
+                      <p className="font-medium text-text-main truncate font-mono">{rule.alias || model}</p>
+                      {rule.alias && rule.alias !== model && (
+                        <span className="text-xs text-text-muted font-mono bg-surface-hover px-2 py-0.5 rounded">
+                          target: {model}
+                        </span>
+                      )}
                       <span className="text-xs rounded-full bg-surface-hover px-2 py-0.5 text-text-muted">{providerName}</span>
                       <span className="text-xs rounded-full bg-surface-hover px-2 py-0.5 text-text-muted">
                         {isWizardRule(rule) ? `${accounts.length} account${accounts.length === 1 ? "" : "s"}` : "advanced rule"}
@@ -321,7 +357,7 @@ export default function AccountRoutingPage() {
                     ) : (
                       <span
                         className="text-xs text-text-muted px-1"
-                        title="Rule was created with advanced syntax (API) — edit via DELETE + recreate"
+                        title="Rule was created with advanced syntax (API) - edit via DELETE + recreate"
                       >
                         (api)
                       </span>
@@ -350,7 +386,7 @@ export default function AccountRoutingPage() {
       >
         {draft && (
           <div className="flex flex-col gap-5">
-            {/* Step 1 — provider */}
+            {/* Step 1 - provider */}
             <div>
               <p className="text-sm font-medium text-text-main mb-2">1. Provider</p>
               <Combobox
@@ -364,47 +400,52 @@ export default function AccountRoutingPage() {
               />
             </div>
 
-            {/* Step 2 — model */}
+            {/* Step 2 - model */}
             {draftProvider && (
               <div>
                 <p className="text-sm font-medium text-text-main mb-2">2. Model</p>
                 <Combobox
                   value={draft.model}
-                  onChange={(m) => setDraft({ ...draft, model: m })}
+                  onChange={(m) => {
+                    const nextAlias = !draft.alias || draft.alias === draft.model ? m : draft.alias;
+                    setDraft({ ...draft, model: m, alias: nextAlias });
+                  }}
                   options={draftProvider.models.map((m) => ({ value: m, label: m }))}
-                  placeholder="Select model..."
-                  emptyHint="No models listed for this provider"
+                  placeholder="Select or enter model..."
+                  emptyHint="No predefined models - type above to use custom model"
+                  allowCustom={true}
                 />
                 {draftProvider.models.length === 0 && (
-                  <p className="text-xs text-text-muted mt-1.5">No models listed for this provider — connect an account or add models first.</p>
+                  <p className="text-xs text-text-muted mt-1.5">No predefined models listed - type any model name in the search box to add it.</p>
                 )}
               </div>
             )}
 
-            {/* Optional: callable alias — exposes this route as its own model id */}
+            {/* Step 3 - mandatory unique routed model id */}
             {draftProvider && draft.model && (
               <div>
                 <p className="text-sm font-medium text-text-main mb-2">
-                  Route name <span className="text-text-muted font-normal">(optional — call this model by id from any client)</span>
+                  3. Routed Model ID <span className="text-primary">*</span>
                 </p>
                 <input
                   type="text"
                   value={draft.alias}
                   onChange={(e) => setDraft({ ...draft, alias: e.target.value })}
-                  placeholder="e.g. sol-plus, team-fast"
-                  className="w-full rounded-lg border border-border-base bg-surface px-3 py-2 text-sm text-text-main focus:outline-none focus:ring-1 focus:ring-primary/50"
+                  placeholder="e.g. sol-plus, gpt-5.6-luna-free"
+                  className="w-full rounded-lg border border-border-base bg-surface px-3 py-2 text-sm text-text-main focus:outline-none focus:ring-1 focus:ring-primary/50 font-mono"
+                  required
                 />
                 <p className="text-xs text-text-muted mt-1.5">
-                  Unique. Clients can request <span className="text-text-main">{draft.alias?.trim() || "<name>"}</span> directly — it routes to {draft.model} on the accounts below. Leave empty to keep the route internal.
+                  Mandatory and unique across all routes. Clients request this ID directly (e.g. via OpenAI API /v1/chat/completions with <code className="text-text-main font-mono">{draft.alias?.trim() || "<id>"}</code>) to route to {draft.model} across the selected accounts.
                 </p>
               </div>
             )}
 
-            {/* Step 3 — accounts */}
+            {/* Step 4 - accounts */}
             {draftProvider && draft.model && (
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-medium text-text-main">3. Accounts allowed to serve this model</p>
+                  <p className="text-sm font-medium text-text-main">4. Accounts allowed to serve this model</p>
                   <div className="flex gap-2">
                     <button className="text-xs text-primary hover:underline" onClick={() => setDraft({ ...draft, accountIds: draftAccounts.map((a) => a.id) })}>All</button>
                     <button className="text-xs text-primary hover:underline" onClick={() => setDraft({ ...draft, accountIds: draftAccounts.filter((a) => a.plan === "free").map((a) => a.id) })}>Free</button>
@@ -441,7 +482,7 @@ export default function AccountRoutingPage() {
                   </div>
                 )}
                 <p className="text-xs text-text-muted mt-2">
-                  {draft.accountIds.length} of {draftAccounts.length} selected. Requests for this model fail only if every selected account is cooling down — other accounts are never used.
+                  {draft.accountIds.length} of {draftAccounts.length} selected. Requests for this model fail only if every selected account is cooling down - other accounts are never used.
                 </p>
               </div>
             )}

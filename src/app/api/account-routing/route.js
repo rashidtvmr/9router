@@ -3,6 +3,8 @@ import {
   getSettings,
   updateSettings,
   getProviderConnections,
+  getProviderNodes,
+  getCustomModels,
   getModelAliases,
   setModelAlias,
   deleteModelAlias,
@@ -17,7 +19,7 @@ export const revalidate = 0;
 
 const RESPONSE_HEADERS = { "Cache-Control": "no-store" };
 
-function pickProviderList(connections) {
+function pickProviderList(connections, nodeMap = new Map()) {
   // Providers that actually have connections, ordered by count desc then name.
   const byProvider = new Map();
   for (const c of connections || []) {
@@ -25,39 +27,101 @@ function pickProviderList(connections) {
     entry.count += 1;
     byProvider.set(c.provider, entry);
   }
-  return [...byProvider.values()].sort((a, b) => b.count - a.count || a.provider.localeCompare(b.provider));
+  return [...byProvider.values()].sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    const nameA = nodeMap.get(a.provider)?.name || AI_PROVIDERS[a.provider]?.name || a.provider;
+    const nameB = nodeMap.get(b.provider)?.name || AI_PROVIDERS[b.provider]?.name || b.provider;
+    return nameA.localeCompare(nameB);
+  });
 }
 
-function pickModelList(providerId, connections) {
-  // Models the provider's connections actually expose. Codex accounts list
-  // their entitlements; compatible providers fall back to the static catalog.
+function pickModelList(providerId, connections, customModels = [], modelAliases = {}, node = null) {
+  // Models the provider actually exposes across static catalog, custom models, aliases, and connection data.
   const ids = new Set();
+  const prefix = node?.prefix;
+  const alias = AI_PROVIDERS[providerId]?.alias || providerId;
+
+  // 1. Static catalog models
+  for (const m of getModelsByProviderId(providerId) || []) {
+    if (m?.id) ids.add(m.id);
+  }
+
+  // 2. Custom models registered in DB (matches providerId, node prefix, or alias)
+  for (const m of customModels || []) {
+    if (
+      m?.id &&
+      (m.providerAlias === providerId ||
+        (prefix && m.providerAlias === prefix) ||
+        (alias && m.providerAlias === alias))
+    ) {
+      ids.add(m.id);
+    }
+  }
+
+  // 3. Model aliases in KV
+  for (const [, target] of Object.entries(modelAliases || {})) {
+    if (typeof target === "string") {
+      if (target.startsWith(`${providerId}/`)) ids.add(target.slice(providerId.length + 1));
+      else if (prefix && target.startsWith(`${prefix}/`)) ids.add(target.slice(prefix.length + 1));
+      else if (alias && target.startsWith(`${alias}/`)) ids.add(target.slice(alias.length + 1));
+    }
+  }
+
+  // 4. Connection metadata (enabledModels, models array, defaultModel)
   for (const c of connections || []) {
-    const models = c?.providerSpecificData?.enabledModels;
-    if (Array.isArray(models)) models.forEach((m) => m && ids.add(m));
+    const psd = c?.providerSpecificData;
+    if (Array.isArray(psd?.enabledModels)) {
+      psd.enabledModels.forEach((m) => m && ids.add(m));
+    }
+    if (Array.isArray(c?.models)) {
+      c.models.forEach((m) => m && ids.add(m));
+    }
+    if (Array.isArray(psd?.models)) {
+      psd.models.forEach((m) => m && ids.add(m));
+    }
+    if (typeof psd?.defaultModel === "string" && psd.defaultModel.trim()) {
+      ids.add(psd.defaultModel.trim());
+    }
+    if (typeof c?.defaultModel === "string" && c.defaultModel.trim()) {
+      ids.add(c.defaultModel.trim());
+    }
   }
-  if (ids.size === 0) {
-    getModelsByProviderId(providerId).forEach((m) => ids.add(m.id));
-  }
+
   return [...ids].sort();
 }
 
-/** A route alias must not shadow an existing model id, combo, alias, or provider prefix. */
-async function validateRouteAlias(alias, target, rules) {
+/** A route alias (routed model id) must be non-empty, unique, and not shadow combos, other routes, or reserved provider prefixes. */
+async function validateRouteAlias(alias, target, rules, ruleId) {
   const name = String(alias || "").trim();
-  if (!name) return null; // alias optional
+  if (!name) return "Routed Model ID is required";
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) {
-    return "Alias may only contain letters, numbers, dots, dashes, underscores";
+    return "Routed Model ID may only contain letters, numbers, dots, dashes, underscores";
   }
-  if (name.includes("/")) return "Alias must not contain '/'";
+  if (name.includes("/")) return "Routed Model ID must not contain '/'";
 
   const [aliases, combos] = await Promise.all([getModelAliases(), getCombos().catch(() => [])]);
-  if (combos?.some((c) => c.name === name)) return `Alias "${name}" is already a combo name`;
-  const otherRoute = (rules || []).find((r) => r.alias === name);
-  const targetModel = `${target.provider}/${target.model}`;
-  if (aliases[name] && aliases[name] !== targetModel && !otherRoute) {
-    return `Alias "${name}" is already used`;
+  if (combos?.some((c) => c.name?.toLowerCase() === name.toLowerCase())) {
+    return `Routed Model ID "${name}" is already a combo name`;
   }
+
+  // Check duplicate across rules being saved (case-insensitive)
+  const duplicates = (rules || []).filter(
+    (r) => String(r.alias || "").trim().toLowerCase() === name.toLowerCase() && r.id !== ruleId
+  );
+  if (duplicates.length > 0) {
+    return `Routed Model ID "${name}" is already used by another route`;
+  }
+
+  const targetModel = `${target.provider}/${target.model}`;
+  if (aliases[name] && aliases[name] !== targetModel) {
+    const isOtherRoute = (rules || []).some(
+      (r) => r.id !== ruleId && String(r.alias || "").trim().toLowerCase() === name.toLowerCase()
+    );
+    if (isOtherRoute) {
+      return `Routed Model ID "${name}" is already used`;
+    }
+  }
+
   // Provider prefixes are reserved (e.g. "cx", "codex", "openai")
   if (AI_PROVIDERS[name]) return `"${name}" is a reserved provider name`;
   return null;
@@ -92,21 +156,36 @@ async function syncRouteAliases(nextRules, prevRules) {
 
 export async function GET() {
   try {
-    const [settings, connections] = await Promise.all([
+    const [settings, connections, nodes, customModels, modelAliases] = await Promise.all([
       getSettings(),
       getProviderConnections({ isActive: true }),
+      getProviderNodes().catch(() => []),
+      getCustomModels().catch(() => []),
+      getModelAliases().catch(() => ({})),
     ]);
     const routing = normalizeRouting(settings.accountRouting);
+    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
-    // Build the simple pickers: provider → models, provider → accounts.
-    const providers = pickProviderList(connections).map(({ provider, count }) => {
+    // Build the simple pickers: provider -> models, provider -> accounts.
+    const providers = pickProviderList(connections, nodeMap).map(({ provider, count }) => {
       const conns = connections.filter((c) => c.provider === provider);
+      const node = nodeMap.get(provider);
+      const providerInfo = AI_PROVIDERS[provider];
+      const name =
+        node?.name ||
+        providerInfo?.name ||
+        conns[0]?.providerSpecificData?.providerName ||
+        conns[0]?.providerSpecificData?.nodeName ||
+        conns[0]?.name ||
+        provider;
+      const alias = node?.prefix || providerInfo?.alias || provider;
+
       return {
         id: provider,
-        name: AI_PROVIDERS[provider]?.name || provider,
-        alias: provider,
+        name,
+        alias,
         connectionCount: count,
-        models: pickModelList(provider, conns),
+        models: pickModelList(provider, conns, customModels, modelAliases, node),
         accounts: conns.map((c) => ({
           id: c.id,
           name: c.displayName || c.name || c.email || c.id,
@@ -136,14 +215,21 @@ export async function PATCH(request) {
     const routing = normalizeRouting(body.accountRouting);
     const rules = routing.rules.map((r) => normalizeRule(r));
 
-    // Validate every rule that requests a callable alias
+    // Validate every rule: alias (routed model id) is mandatory and unique
     for (const rule of rules) {
-      if (!rule.alias) continue;
+      const alias = String(rule.alias || "").trim();
+      if (!alias) {
+        return NextResponse.json(
+          { error: `Route "${rule.name || rule.id}": Routed Model ID is required` },
+          { status: 400 }
+        );
+      }
       const target = { provider: rule.match?.providers?.[0], model: rule.match?.models?.[0] };
-      const problem = await validateRouteAlias(rule.alias, target, rules);
+      const problem = await validateRouteAlias(alias, target, rules, rule.id);
       if (problem) {
         return NextResponse.json({ error: `Route "${rule.name || rule.id}": ${problem}` }, { status: 400 });
       }
+      rule.alias = alias;
     }
 
     routing.rules = rules;
