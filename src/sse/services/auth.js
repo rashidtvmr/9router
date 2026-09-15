@@ -1,5 +1,5 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
-import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
+import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
@@ -75,15 +75,46 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         };
       }
 
-      // 2. Anonymous free tier: egress DIRECTLY. Zen keys the free quota on
-      //    the connecting IP, and every relay/worker egress IP is blanket
-      //    rate-limited upstream (verified: even a paid key 429s through the
-      //    relay). A pool override pinned in settings is ignored here on
-      //    purpose — logging so the mismatch is discoverable.
+      // 2. Anonymous free tier: zen keys the free quota on the connecting IP.
+      //    Route through the settings proxy pool when one is pinned (AWS
+      //    Lambda relays give each region a distinct egress IP; CF worker
+      //    relays share one anycast IP and stay useless here). With a rotate
+      //    strategy set, cycle across ALL active relay pools for per-region
+      //    egress diversity. Fall back to direct egress when no pool is set.
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
-      if (override.proxyPoolId && override.proxyPoolId !== "__none__") {
-        log.warn("AUTH", `${providerId} | free tier ignores proxy pool ${override.proxyPoolId}: zen throttles relay egress IPs; going direct`);
+
+      let poolId = null;
+      if (override.rotateStrategy && override.rotateStrategy !== "none") {
+        const allPools = await getProxyPools();
+        const relayPoolIds = (allPools || [])
+          .filter((p) => p.isActive === true && (p.type === "vercel" || p.type === "cloudflare" || p.type === "deno"))
+          .map((p) => p.id);
+        poolId = relayPoolIds.length > 0
+          ? pickProxyPoolId(relayPoolIds, override.rotateStrategy, providerId)
+          : null;
+      } else if (override.proxyPoolId && override.proxyPoolId !== "__none__") {
+        poolId = override.proxyPoolId;
+      }
+
+      if (poolId) {
+        const poolConfig = await resolveConnectionProxyConfig({ proxyPoolId: poolId });
+        if (poolConfig?.vercelRelayUrl || poolConfig?.connectionProxyEnabled) {
+          return {
+            id: "noauth",
+            connectionName: "Public",
+            isActive: true,
+            accessToken: "public",
+            providerSpecificData: {
+              connectionProxyEnabled: poolConfig.connectionProxyEnabled,
+              connectionProxyUrl: poolConfig.connectionProxyUrl,
+              connectionNoProxy: poolConfig.connectionNoProxy,
+              connectionProxyPoolId: poolConfig.proxyPoolId || null,
+              vercelRelayUrl: poolConfig.vercelRelayUrl || "",
+            },
+          };
+        }
+        log.warn("AUTH", `${providerId} | free tier proxy pool ${poolId} unusable; going direct`);
       }
       return {
         id: "noauth",
