@@ -1,4 +1,4 @@
-# AWS Lambda relay pool (17 regions)
+# AWS Lambda relay pool (17 regions x 2 accounts = 34 relays)
 
 Streaming pass-through relay for the opencode zen free tier. Deployed as
 `zen-relay` (nodejs22.x, arm64, 256MB, timeout 120s) with a public Function
@@ -44,6 +44,14 @@ aws lambda create-function-url-config --region $R --function-name zen-relay --qu
   --cors '{"AllowHeaders":["*"],"AllowMethods":["*"],"AllowOrigins":["*"],"MaxAge":86400}'
 ```
 
-## Regions live (ap-south-2 fails CreateFunctionUrlConfig on this account)
+## Regions live (ap-south-2 fails CreateFunctionUrlConfig on both accounts)
 us-east-1/2, us-west-1/2, ca-central-1, sa-east-1, eu-west-1/2/3, eu-central-1,
 eu-north-1, ap-south-1, ap-southeast-1/2, ap-northeast-1/2/3
+
+## Accounts
+- 135775792878 (lenovo-cli): pools `aws-relay-<region>`
+- 042467473346 (lenovo-cli-updated, profile `relay2`, keys in repo `.env` as
+  `AWS_RELAY_ACCOUNT_2_*`): pools `aws2-relay-<region>`
+Both accounts deploy the same regions; egress IPs differ per account even in
+the same region (verified us-east-1: 100.27.49.230 vs 13.221.160.235), so the
+round-robin rotation over all active relay pools yields 34 distinct IPs.
