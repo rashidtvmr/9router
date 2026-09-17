@@ -115,17 +115,16 @@ function normalizeOpencodeReasoning(model, body) {
  * The hook may return a base URL (string) or a promise resolving to one.
  * Returns null when no rotation is configured.
  */
-function resolveRotationBaseUrl() {
-  const transport = PROVIDERS?.opencode?.transport;
+async function resolveRotationBaseUrl() {
+  // PROVIDERS contains normalized transport objects. Keep the nested lookup as
+  // a compatibility fallback for callers still supplying registry-shaped data.
+  const provider = PROVIDERS?.opencode;
+  const transport = provider?.sessionRetry ? provider : provider?.transport;
   const sessionRetry = transport?.sessionRetry;
   if (sessionRetry == null) return null;
   const hook = typeof sessionRetry === "object" ? sessionRetry.baseUrlFn : transport.baseUrlFn;
   if (typeof hook !== "function") return null;
-  try {
-    return hook();
-  } catch {
-    return null;
-  }
+  try { return await hook(); } catch { return null; }
 }
 
 /**
@@ -182,10 +181,11 @@ export class OpenCodeExecutor extends BaseExecutor {
     // recovery. We store the request-local session id, the effective UA, and a
     // representative body shape that the native CLI would have sent.
     if (result?.response && result.response.ok) {
-      const session = normalizeHeaderValue(credentials?.[OPENCODE_SESSION_FIELD])
-        || normalizeHeaderValue(result.headers?.[OPENCODE_SESSION_HEADER]);
+      const preparedSession = normalizeHeaderValue(credentials?.[OPENCODE_SESSION_FIELD]);
+      const responseSession = normalizeHeaderValue(result.response?.headers?.["x-session-id"] ?? result.response?.headers?.get?.("x-session-id"));
+      const session = preparedSession || responseSession;
       if (session) {
-        const ua = result.headers?.["user-agent"] || OPENCODE_UA;
+        const ua = result.response?.headers?.["user-agent"] || result.response?.headers?.get?.("user-agent") || OPENCODE_UA;
         const bodyForReplay = result.transformedBody
           ? { ...result.transformedBody }
           : null;
@@ -230,10 +230,15 @@ export class OpenCodeExecutor extends BaseExecutor {
     // then fall back to the original config base URL.
     const currentBase = this.config.baseUrl;
     let retryBase = currentBase;
-    const rotateUpstream = freeSessionConfig.OPENCODE_FREE_SESSION_ROTATION?.rotateUpstream
-      || this.config?.sessionRotation?.rotateUpstream;
-    if (typeof rotateUpstream === "function") {
-      try { retryBase = await (rotateUpstream(this.provider, currentBase) || currentBase); } catch { /* fail open */ }
+    const providerRotationBase = await resolveRotationBaseUrl();
+    if (providerRotationBase) {
+      retryBase = providerRotationBase;
+    } else {
+      const rotateUpstream = freeSessionConfig.OPENCODE_FREE_SESSION_ROTATION?.rotateUpstream
+        || this.config?.sessionRotation?.rotateUpstream;
+      if (typeof rotateUpstream === "function") {
+        try { retryBase = await (rotateUpstream(this.provider, currentBase) || currentBase); } catch { /* fail open */ }
+      }
     }
 
     // Build the native-replay URL and headers.

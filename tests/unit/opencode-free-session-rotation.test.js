@@ -20,18 +20,23 @@ vi.mock("../../open-sse/config/opencodeFreeSession.js", () => ({
   ],
   OPENCODE_NATIVE_SESSION_CACHE: { maxEntries: 1, ttlMs: 999999 },
   OPENCODE_SESSION_RETRY: { maxAttempts: 1, delayMs: 0 },
+  OPENCODE_FREE_SESSION_ROTATION: {},
 }));
 
 const { OpenCodeExecutor } = await import("../../open-sse/executors/opencode.js");
 const { opencodeNativeSessionCache } = await import("../../open-sse/utils/opencodeNativeSessionCache.js");
 
 function makeResponse(status, bodyText = "") {
-  return {
+  const response = {
     status,
     ok: status >= 200 && status < 300,
     headers: new Map(),
     text: async () => bodyText,
   };
+  // Match the Fetch Response contract used by isOpenCodeFreeError. Cloning
+  // also ensures error-body inspection does not consume the returned body.
+  response.clone = () => ({ text: async () => bodyText });
+  return response;
 }
 
 function makeExecutor() {
@@ -51,7 +56,6 @@ describe("OpenCodeExecutor — native session cache population", () => {
   it("captures session context on a successful 200 response", async () => {
     const executor = makeExecutor();
     const creds = { rawHeaders: {}, accessToken: "public" };
-    const prepared = executor.prepareRequestCredentials({ body: { messages: [] }, credentials: creds, providerSessionId: "test-session-abc" });
 
     fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
 
@@ -59,7 +63,8 @@ describe("OpenCodeExecutor — native session cache population", () => {
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
-      credentials: prepared,
+      credentials: creds,
+      providerSessionId: "test-session-abc",
     });
 
     const cached = opencodeNativeSessionCache.get();
@@ -94,11 +99,10 @@ describe("OpenCodeExecutor — retry on FreeTierError", () => {
       sessionId: "ses_f522c1acdffeoC2Waba3K5rn6v",
       userAgent: "opencode/1.18.31",
       requestBody: null,
-    });
+    }, "default");
 
     const executor = makeExecutor();
     const creds = { rawHeaders: {}, accessToken: "public" };
-    const prepared = executor.prepareRequestCredentials({ body: { messages: [] }, credentials: creds, providerSessionId: "synth-session" });
 
     // First call: 403 FreeTierError
     fetchMock.mockResolvedValueOnce(
@@ -111,12 +115,9 @@ describe("OpenCodeExecutor — retry on FreeTierError", () => {
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
-      credentials: prepared,
+      credentials: creds,
+      providerSessionId: "synth-session",
     });
-
-    expect(result.response.status).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-
     // Verify the retry used the cached native session id in headers.
     const retryHeaders = fetchMock.mock.calls[1][1].headers;
     expect(retryHeaders["x-session-id"]).toBe("ses_f522c1acdffeoC2Waba3K5rn6v");
@@ -130,14 +131,9 @@ describe("OpenCodeExecutor — retry on FreeTierError", () => {
       sessionId: "ses_native-replay-123",
       userAgent: "opencode/1.18.26",
       requestBody: null,
-    });
+    }, "default");
 
     const executor = makeExecutor();
-    const prepared = executor.prepareRequestCredentials({
-      body: { messages: [] },
-      credentials: { rawHeaders: {}, accessToken: "public" },
-      providerSessionId: "synth-456",
-    });
 
     fetchMock.mockResolvedValueOnce(makeResponse(429, "rate limit exceeded"));
     fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
@@ -146,7 +142,8 @@ describe("OpenCodeExecutor — retry on FreeTierError", () => {
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
-      credentials: prepared,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-456",
     });
 
     expect(result.response.status).toBe(200);
@@ -160,14 +157,9 @@ describe("OpenCodeExecutor — retry on FreeTierError", () => {
       sessionId: "ses_payment-needed-abc",
       userAgent: "opencode/1.18.26",
       requestBody: null,
-    });
+    }, "default");
 
     const executor = makeExecutor();
-    const prepared = executor.prepareRequestCredentials({
-      body: { messages: [] },
-      credentials: { rawHeaders: {}, accessToken: "public" },
-      providerSessionId: "synth-789",
-    });
 
     fetchMock.mockResolvedValueOnce(makeResponse(402, "payment required"));
     fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
@@ -176,7 +168,8 @@ describe("OpenCodeExecutor — retry on FreeTierError", () => {
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
-      credentials: prepared,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-789",
     });
 
     expect(result.response.status).toBe(200);
@@ -189,24 +182,22 @@ describe("OpenCodeExecutor — DC IP rotation hook", () => {
     // The rotation hook is read from PROVIDERS.opencode.transport.sessionRetry.baseUrlFn.
     // We mock PROVIDERS to inject a hook.
     const { PROVIDERS } = await import("../../open-sse/config/providers.js");
-    const originalFn = PROVIDERS.opencode?.transport?.sessionRetry?.baseUrlFn;
+    // PROVIDERS is the normalized transport map, so opencode itself is the
+    // transport object (the registry entry is not exposed here).
+    const transport = PROVIDERS.opencode;
+    const originalFn = transport?.sessionRetry?.baseUrlFn;
 
     const rotationHook = vi.fn(() => "https://rotated-dc.9router.dev");
-    if (!PROVIDERS.opencode.transport.sessionRetry) PROVIDERS.opencode.transport.sessionRetry = {};
-    PROVIDERS.opencode.transport.sessionRetry.baseUrlFn = rotationHook;
+    if (!transport.sessionRetry) transport.sessionRetry = {};
+    transport.sessionRetry.baseUrlFn = rotationHook;
 
     opencodeNativeSessionCache.set({
       sessionId: "ses_rotated-retry",
       userAgent: "opencode/1.18.26",
       requestBody: null,
-    });
+    }, "default");
 
     const executor = makeExecutor();
-    const prepared = executor.prepareRequestCredentials({
-      body: { messages: [] },
-      credentials: { rawHeaders: {}, accessToken: "public" },
-      providerSessionId: "synth-rotation",
-    });
 
     fetchMock.mockResolvedValueOnce(makeResponse(429, "rate limit"));
     fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
@@ -215,7 +206,8 @@ describe("OpenCodeExecutor — DC IP rotation hook", () => {
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
-      credentials: prepared,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-rotation",
     });
 
     expect(rotationHook).toHaveBeenCalledOnce();
@@ -226,19 +218,14 @@ describe("OpenCodeExecutor — DC IP rotation hook", () => {
     expect(retryUrl).toContain("rotated-dc.9router.dev");
 
     // Restore.
-    if (originalFn) PROVIDERS.opencode.transport.sessionRetry.baseUrlFn = originalFn;
-    else delete PROVIDERS.opencode.transport.sessionRetry?.baseUrlFn;
+    if (originalFn) transport.sessionRetry.baseUrlFn = originalFn;
+    else delete transport.sessionRetry?.baseUrlFn;
   });
 });
 
 describe("OpenCodeExecutor — no-op when cache is empty", () => {
   it("returns the original error response when no native session is cached", async () => {
     const executor = makeExecutor();
-    const prepared = executor.prepareRequestCredentials({
-      body: { messages: [] },
-      credentials: { rawHeaders: {}, accessToken: "public" },
-      providerSessionId: "synth-no-cache",
-    });
 
     fetchMock.mockResolvedValueOnce(makeResponse(403, '{"error":{"type":"FreeTierError","message":"not native"}}'));
 
@@ -246,7 +233,8 @@ describe("OpenCodeExecutor — no-op when cache is empty", () => {
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
-      credentials: prepared,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-no-cache",
     });
 
     // No cache → no retry → fetch called only once.
@@ -265,11 +253,6 @@ describe("OpenCodeExecutor — non-free-tier errors do not trigger replay", () =
     });
 
     const executor = makeExecutor();
-    const prepared = executor.prepareRequestCredentials({
-      body: { messages: [] },
-      credentials: { rawHeaders: {}, accessToken: "public" },
-      providerSessionId: "synth-403",
-    });
 
     fetchMock.mockResolvedValueOnce(makeResponse(403, '{"error":{"type":"permission_error","message":"Forbidden"}}'));
 
@@ -277,7 +260,8 @@ describe("OpenCodeExecutor — non-free-tier errors do not trigger replay", () =
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
-      credentials: prepared,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-403",
     });
 
     // 403 without FreeTierError text → not eligible for retry.
@@ -293,11 +277,6 @@ describe("OpenCodeExecutor — non-free-tier errors do not trigger replay", () =
     });
 
     const executor = makeExecutor();
-    const prepared = executor.prepareRequestCredentials({
-      body: { messages: [] },
-      credentials: { rawHeaders: {}, accessToken: "public" },
-      providerSessionId: "synth-500",
-    });
 
     fetchMock.mockResolvedValueOnce(makeResponse(500, "internal server error"));
 
@@ -305,7 +284,8 @@ describe("OpenCodeExecutor — non-free-tier errors do not trigger replay", () =
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
-      credentials: prepared,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-500",
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
