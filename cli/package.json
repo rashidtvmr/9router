@@ -3,7 +3,8 @@
   "version": "0.5.75",
   "description": "9Router CLI - Start and manage 9Router server",
   "bin": {
-    "9router": "./cli.js"
+    "9router": "./cli.js",
+    "9router2": "./cli.js"
   },
   "files": [
     "cli.js",

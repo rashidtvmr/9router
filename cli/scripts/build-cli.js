@@ -10,7 +10,8 @@ const rootDir = path.resolve(appDir, "..");
 const cliAppDir = process.env.NINEROUTER_CLI_APP_DIR || path.join(cliDir, "app");
 const buildHomeDir = path.join(cliDir, ".build-home");
 const buildDistDirName = ".next-cli-build";
-const buildDistDir = path.join(appDir, buildDistDirName);
+const reuseAppBuild = process.argv.includes("--reuse-app-build");
+const buildDistDir = path.join(appDir, reuseAppBuild ? ".next" : buildDistDirName);
 
 // Exclude patterns for files/folders we don't want to copy
 const EXCLUDE_PATTERNS = [
@@ -169,25 +170,29 @@ function buildCliPackage() {
   }
 
   // Step 1: Build app with Next.js (workspace tracing root → traced node_modules in standalone).
-  console.log("1️⃣  Building Next.js app...");
-  try {
-    execSync("npm run build", {
-      stdio: "inherit",
-      cwd: appDir,
-      env: {
-        ...process.env,
-        HOME: buildHomeDir,
-        USERPROFILE: buildHomeDir,
-        APPDATA: path.join(buildHomeDir, "AppData", "Roaming"),
-        LOCALAPPDATA: path.join(buildHomeDir, "AppData", "Local"),
-        NEXT_DIST_DIR: buildDistDirName,
-        NEXT_TRACING_ROOT_MODE: "workspace",
-      }
-    });
-    console.log("✅ Next.js build completed\n");
-  } catch (error) {
-    console.error("❌ Next.js build failed");
-    process.exit(1);
+  if (reuseAppBuild) {
+    console.log("1️⃣  Reusing the completed Next.js build...\n");
+  } else {
+    console.log("1️⃣  Building Next.js app...");
+    try {
+      execSync("npm run build", {
+        stdio: "inherit",
+        cwd: appDir,
+        env: {
+          ...process.env,
+          HOME: buildHomeDir,
+          USERPROFILE: buildHomeDir,
+          APPDATA: path.join(buildHomeDir, "AppData", "Roaming"),
+          LOCALAPPDATA: path.join(buildHomeDir, "AppData", "Local"),
+          NEXT_DIST_DIR: buildDistDirName,
+          NEXT_TRACING_ROOT_MODE: "workspace",
+        }
+      });
+      console.log("✅ Next.js build completed\n");
+    } catch (error) {
+      console.error("❌ Next.js build failed");
+      process.exit(1);
+    }
   }
 
   // Step 2: Clean old app/cli/app if exists
