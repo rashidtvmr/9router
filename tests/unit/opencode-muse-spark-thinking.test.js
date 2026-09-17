@@ -51,6 +51,18 @@ describe("OpenCode Free Muse Spark thinking", () => {
     expect(executor.buildHeaders(credentials, true)["x-opencode-session"]).toBe("native-session");
   });
 
+  it("uses a versioned OpenCode user agent for free-tier compatibility", () => {
+    const executor = new OpenCodeExecutor();
+
+    expect(executor.buildHeaders({ rawHeaders: {} }, true)["User-Agent"]).toBe("opencode/1.18.26");
+    expect(executor.buildHeaders({ rawHeaders: { "user-agent": "opencode/1.16.9" } }, true)["User-Agent"])
+      .toBe("opencode/1.18.26");
+    expect(executor.buildHeaders({ rawHeaders: { "user-agent": "opencode/1.17.0" } }, true)["User-Agent"])
+      .toBe("opencode/1.17.0");
+    expect(executor.buildHeaders({ rawHeaders: { "user-agent": "opencode/1.18.26" } }, true)["User-Agent"])
+      .toBe("opencode/1.18.26");
+  });
+
   it("advertises reasoning and the requested model limits", () => {
     expect(PROVIDER_MODELS.oc?.some((model) => model.id === MODEL)).toBe(true);
     expect(PROVIDER_MODELS.oc?.some((model) => model.id === "muse-spark-1.3-contributor-free")).toBe(true);

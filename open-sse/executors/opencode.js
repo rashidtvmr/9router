@@ -6,7 +6,11 @@ import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
 
-const OPENCODE_UA = "opencode";
+// OpenCode Console rejects the anonymous free-tier token unless the request
+// identifies a sufficiently recent OpenCode client. Keep this version at or
+// above the upstream minimum even when the caller is a generic OpenAI client.
+const OPENCODE_MIN_VERSION = [1, 17, 0];
+const OPENCODE_UA = "opencode/1.18.26";
 const OPENCODE_SESSION_FIELD = "_opencodeSession";
 // Models served by /zen/v1/responses; every other model stays on /chat/completions.
 const RESPONSES_MODELS = new Set([
@@ -26,6 +30,16 @@ function normalizeHeaderValue(value) {
   if (typeof value !== "string") return "";
   const normalized = value.trim();
   return normalized.length <= 256 ? normalized : "";
+}
+
+function hasSupportedOpenCodeVersion(userAgent) {
+  const match = /^opencode\/(\d+)\.(\d+)\.(\d+)/i.exec(String(userAgent || "").trim());
+  if (!match) return false;
+  const version = match.slice(1, 4).map(Number);
+  for (let index = 0; index < OPENCODE_MIN_VERSION.length; index += 1) {
+    if (version[index] !== OPENCODE_MIN_VERSION[index]) return version[index] > OPENCODE_MIN_VERSION[index];
+  }
+  return true;
 }
 
 // Strip the thinking suffix "model(level)" so registry lookups hit the base id.
@@ -128,7 +142,7 @@ export class OpenCodeExecutor extends BaseExecutor {
     for (const [k, v] of Object.entries(raw)) lower[k.toLowerCase()] = v;
 
     const downstreamUa = lower["user-agent"] || "";
-    const isOpencodeDownstream = downstreamUa.toLowerCase().includes("opencode");
+    const isOpencodeDownstream = hasSupportedOpenCodeVersion(downstreamUa);
 
     // Keyed connections (real API key) get keyed quota upstream; anonymous
     // free tier rides the "public" token.
