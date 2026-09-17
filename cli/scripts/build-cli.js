@@ -266,7 +266,10 @@ function buildCliPackage() {
   console.log("4️⃣  Copying static files...");
   const staticSrc = path.join(appDir, ".next", "static");
   const staticSrcResolved = path.join(buildDistDir, "static");
-  const staticDest = path.join(cliAppDir, buildDistDirName, "static");
+  // The standalone server resolves `/_next/static/*` relative to its runtime
+  // `.next` directory. `buildDistDirName` is only the temporary source tree
+  // used while packaging and is not the runtime dist directory.
+  const staticDest = path.join(cliAppDir, ".next", "static");
   if (fs.existsSync(staticSrcResolved) || fs.existsSync(staticSrc)) {
     copyRecursive(fs.existsSync(staticSrcResolved) ? staticSrcResolved : staticSrc, staticDest);
     console.log("✅ Copied static files\n");
