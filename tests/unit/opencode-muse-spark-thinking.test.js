@@ -35,6 +35,10 @@ describe("OpenCode Free Muse Spark thinking", () => {
 
     expect(firstHeaders["x-opencode-session"]).toBe("conversation-first");
     expect(secondHeaders["x-opencode-session"]).toBe("conversation-second");
+    expect(firstHeaders["x-session-id"]).toBe("conversation-first");
+    expect(firstHeaders["x-session-affinity"]).toBe("conversation-first");
+    expect(secondHeaders["x-session-id"]).toBe("conversation-second");
+    expect(secondHeaders["x-session-affinity"]).toBe("conversation-second");
   });
 
   it("preserves a valid downstream session header", () => {
@@ -49,6 +53,8 @@ describe("OpenCode Free Muse Spark thinking", () => {
     });
 
     expect(executor.buildHeaders(credentials, true)["x-opencode-session"]).toBe("native-session");
+    expect(executor.buildHeaders(credentials, true)["x-session-id"]).toBe("native-session");
+    expect(executor.buildHeaders(credentials, true)["x-session-affinity"]).toBe("native-session");
   });
 
   it("uses a versioned OpenCode user agent for free-tier compatibility", () => {

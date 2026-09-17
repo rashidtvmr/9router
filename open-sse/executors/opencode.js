@@ -12,6 +12,8 @@ import { isMuseSparkModel } from "../providers/models/helpers.js";
 const OPENCODE_MIN_VERSION = [1, 17, 0];
 const OPENCODE_UA = "opencode/1.18.26";
 const OPENCODE_SESSION_FIELD = "_opencodeSession";
+const OPENCODE_SESSION_HEADER = "x-session-id";
+const OPENCODE_SESSION_AFFINITY_HEADER = "x-session-affinity";
 // Models served by /zen/v1/responses; every other model stays on /chat/completions.
 const RESPONSES_MODELS = new Set([
   "muse-spark-1.2-contributor-free",
@@ -143,6 +145,10 @@ export class OpenCodeExecutor extends BaseExecutor {
 
     const downstreamUa = lower["user-agent"] || "";
     const isOpencodeDownstream = hasSupportedOpenCodeVersion(downstreamUa);
+    const session = credentials?.[OPENCODE_SESSION_FIELD]
+      || normalizeHeaderValue(lower["x-opencode-session"])
+      || normalizeHeaderValue(lower[OPENCODE_SESSION_HEADER])
+      || generateSessionId();
 
     // Keyed connections (real API key) get keyed quota upstream; anonymous
     // free tier rides the "public" token.
@@ -157,11 +163,13 @@ export class OpenCodeExecutor extends BaseExecutor {
       "Authorization": `Bearer ${apiKey}`,
       "User-Agent": isOpencodeDownstream ? downstreamUa : OPENCODE_UA,
       "x-opencode-client": lower["x-opencode-client"] || "desktop",
-      "x-opencode-session": credentials?.[OPENCODE_SESSION_FIELD]
-        || normalizeHeaderValue(lower["x-opencode-session"])
-        || generateSessionId(),
+      "x-opencode-session": session,
       "x-opencode-request": lower["x-opencode-request"] || generateRequestId(),
       "x-opencode-project": lower["x-opencode-project"] || "global",
+      // OpenCode's anonymous Console tier validates native session context.
+      // The CLI sends both headers with the same stable session id.
+      [OPENCODE_SESSION_HEADER]: normalizeHeaderValue(lower[OPENCODE_SESSION_HEADER]) || session,
+      [OPENCODE_SESSION_AFFINITY_HEADER]: normalizeHeaderValue(lower[OPENCODE_SESSION_AFFINITY_HEADER]) || session,
       "Accept": stream ? "text/event-stream" : "*/*",
     };
   }
