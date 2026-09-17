@@ -230,15 +230,19 @@ export class OpenCodeExecutor extends BaseExecutor {
     // then fall back to the original config base URL.
     const currentBase = this.config.baseUrl;
     let retryBase = currentBase;
+
+    // 1. Provider transport's sessionRetry.baseUrlFn (legacy hook point).
     const providerRotationBase = await resolveRotationBaseUrl();
-    if (providerRotationBase) {
+
+    // 2. Config-driven rotateUpstream (cycles Lambda relay IPs for egress
+    //    diversity — the primary hook for OpenCode free-tier DC rotation).
+    const rotateUpstream = freeSessionConfig.OPENCODE_FREE_SESSION_ROTATION?.rotateUpstream
+      || this.config?.sessionRotation?.rotateUpstream;
+
+    if (providerRotationBase && providerRotationBase !== currentBase) {
       retryBase = providerRotationBase;
-    } else {
-      const rotateUpstream = freeSessionConfig.OPENCODE_FREE_SESSION_ROTATION?.rotateUpstream
-        || this.config?.sessionRotation?.rotateUpstream;
-      if (typeof rotateUpstream === "function") {
-        try { retryBase = await (rotateUpstream(this.provider, currentBase) || currentBase); } catch { /* fail open */ }
-      }
+    } else if (typeof rotateUpstream === "function") {
+      try { retryBase = await (rotateUpstream(this.provider, currentBase) || currentBase); } catch { /* fail open */ }
     }
 
     // Build the native-replay URL and headers.
