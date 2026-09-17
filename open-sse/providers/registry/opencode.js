@@ -14,6 +14,9 @@ export default {
   noAuth: true,
   transport: {
     baseUrl: "https://opencode.ai",
+    sessionRetry: {
+      baseUrlFn: async (_provider, currentBaseUrl) => currentBaseUrl,
+    },
     headers: {
       "x-opencode-client": "desktop",
     },
