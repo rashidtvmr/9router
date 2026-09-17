@@ -10,6 +10,7 @@ import {
   OPENCODE_FREE_ERROR_TEXTS,
   OPENCODE_NATIVE_SESSION_CACHE,
   OPENCODE_SESSION_RETRY,
+  OPENCODE_NATIVE_SESSION_BOOTSTRAP,
 } from "../config/opencodeFreeSession.js";
 import * as freeSessionConfig from "../config/opencodeFreeSession.js";
 import { opencodeNativeSessionCache } from "../utils/opencodeNativeSessionCache.js";
@@ -25,6 +26,9 @@ const OPENCODE_SESSION_FIELD = "_opencodeSession";
 const OPENCODE_SESSION_HEADER = "x-session-id";
 const OPENCODE_SESSION_AFFINITY_HEADER = "x-session-affinity";
 const NATIVE_SESSION_CACHE_KEY = "default";
+// Single-flight guard: prevents concurrent bootstrap probes for the same
+// cache key. Resolves to the cached session entry (or null on failure).
+let nativeBootstrapPromise = null;
 // How long to keep a cached session context around. Native sessions are
 // long-lived but we bound the TTL to avoid replaying a stale/invalidated id.
 const NATIVE_SESSION_TTL_MS = OPENCODE_NATIVE_SESSION_CACHE.ttlMs;
@@ -209,6 +213,47 @@ export class OpenCodeExecutor extends BaseExecutor {
     return result;
   }
 
+  async bootstrapNativeSession(credentials, log) {
+    const cached = opencodeNativeSessionCache.get(NATIVE_SESSION_CACHE_KEY);
+    if (cached) return cached;
+    if (nativeBootstrapPromise) return nativeBootstrapPromise;
+
+    nativeBootstrapPromise = (async () => {
+      const url = `${this.config.baseUrl}/zen/v1/chat/completions`;
+      const headers = this.buildHeaders(credentials, false);
+      const requestBody = {
+        model: "big-pickle",
+        messages: [{ role: "user", content: OPENCODE_NATIVE_SESSION_BOOTSTRAP.probeMessage }],
+        max_tokens: OPENCODE_NATIVE_SESSION_BOOTSTRAP.maxTokens,
+        stream: false,
+      };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), OPENCODE_NATIVE_SESSION_BOOTSTRAP.timeoutMs);
+      try {
+        const response = await proxyAwareFetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        });
+        const sessionId = normalizeHeaderValue(response?.headers?.get?.(OPENCODE_SESSION_HEADER)
+          || response?.headers?.[OPENCODE_SESSION_HEADER]);
+        if (!response?.ok || !sessionId) return null;
+        const entry = { sessionId, userAgent: headers["User-Agent"], requestBody };
+        opencodeNativeSessionCache.set(entry, NATIVE_SESSION_CACHE_KEY);
+        return entry;
+      } catch (error) {
+        log?.debug?.("BOOTSTRAP", `OpenCode native session bootstrap failed: ${error.message}`);
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    })().finally(() => {
+      nativeBootstrapPromise = null;
+    });
+    return nativeBootstrapPromise;
+  }
+
   /**
    * Replay the failed request using the cached native session context.
    *
@@ -221,7 +266,20 @@ export class OpenCodeExecutor extends BaseExecutor {
     const { maxAttempts, delayMs } = OPENCODE_SESSION_RETRY;
     if (maxAttempts <= 0) return null;
 
-    const nativeCtx = opencodeNativeSessionCache.get(NATIVE_SESSION_CACHE_KEY);
+    // Cold-start recovery: if no native session is cached yet (fresh install),
+    // attempt a bootstrap probe before giving up. The bootstrap caches a native
+    // session context that we can then replay with on a fresh egress IP.
+    let nativeCtx = opencodeNativeSessionCache.get(NATIVE_SESSION_CACHE_KEY);
+    if (!nativeCtx && OPENCODE_NATIVE_SESSION_BOOTSTRAP.enabled) {
+      const accessToken = credentials?.accessToken;
+      const isFreeTier = accessToken == null || accessToken === "" || accessToken === "public";
+      if (isFreeTier) {
+        try {
+          await this.bootstrapNativeSession(credentials, args.log);
+        } catch { /* fail open — bootstrap is best-effort */ }
+        nativeCtx = opencodeNativeSessionCache.get(NATIVE_SESSION_CACHE_KEY);
+      }
+    }
     if (!nativeCtx) return null;
 
     const { body, stream, signal, log, proxyOptions } = args;

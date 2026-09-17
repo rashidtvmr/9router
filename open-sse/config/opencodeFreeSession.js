@@ -9,6 +9,14 @@ export const OPENCODE_FREE_ERROR_TEXTS = [
   "capacity",
 ];
 
+export const OPENCODE_NATIVE_SESSION_BOOTSTRAP = {
+  enabled: true,
+  probeMessage: "hi",
+  maxTokens: 1,
+  ttlMs: 60000,
+  timeoutMs: 5000,
+};
+
 // Round-robin state for Lambda relay IP rotation (in-memory, per-process).
 let relayRoundRobinIndex = 0;
 

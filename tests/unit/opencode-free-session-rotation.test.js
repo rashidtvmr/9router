@@ -352,24 +352,75 @@ describe("OpenCodeExecutor — DC IP rotation hook", () => {
   });
 });
 
-describe("OpenCodeExecutor — no-op when cache is empty", () => {
-  it("returns the original error response when no native session is cached", async () => {
+describe("OpenCodeExecutor — cold-start: bootstrap when cache is empty", () => {
+  it("attempts bootstrap on FreeTierError and retries with the bootstrapped session", async () => {
     const executor = makeExecutor();
 
-    fetchMock.mockResolvedValueOnce(makeResponse(403, '{"error":{"type":"FreeTierError","message":"not native"}}'));
+    // First: main request gets 403 FreeTierError.
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(403, '{"error":{"type":"freetiererror","message":"OpenCode free tier"}}'),
+    );
+    // Second: bootstrap probe succeeds and returns a native session id via x-session-id header.
+    const bootstrapResponse = makeResponse(200, '{"choices":[]}');
+    bootstrapResponse.headers.set("x-session-id", "ses_bootstrapped_123");
+    fetchMock.mockResolvedValueOnce(bootstrapResponse);
+    // Third: retry with the bootstrapped session succeeds.
+    fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
 
     const result = await executor.execute({
       model: "big-pickle",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: true,
       credentials: { rawHeaders: {}, accessToken: "public" },
-      providerSessionId: "synth-no-cache",
+      providerSessionId: "synth-cold-start",
     });
 
-    // No cache → no retry → fetch called only once.
+    // Three fetches: main(403) → bootstrap(200 with session) → retry(200).
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    // The retry (3rd call) should use the bootstrapped session id.
+    const retryHeaders = fetchMock.mock.calls[2][1].headers;
+    expect(retryHeaders["x-session-id"]).toBe("ses_bootstrapped_123");
+    expect(result.response.status).toBe(200);
+  });
+
+  it("does not bootstrap for authenticated (non-free) connections", async () => {
+    const executor = makeExecutor();
+
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(403, '{"error":{"type":"freetiererror","message":"not allowed"}}'),
+    );
+
+    const result = await executor.execute({
+      model: "big-pickle",
+      body: { messages: [{ role: "user", content: "hi" }] },
+      stream: true,
+      credentials: { rawHeaders: {}, accessToken: "sk-real-key-123" },
+      providerSessionId: "synth-authed",
+    });
+
+    // Authenticated request → no bootstrap → fetch called once → 403 returned.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.response.status).toBe(403);
-    expect(result.response.ok).toBe(false);
+  });
+
+  it("returns original 403 when bootstrap probe fails", async () => {
+    const executor = makeExecutor();
+
+    fetchMock
+      .mockResolvedValueOnce(makeResponse(403, '{"error":{"type":"freetiererror","message":"OpenCode free tier"}}'))
+      .mockResolvedValueOnce(makeResponse(500, "bootstrap probe failed"));
+
+    const result = await executor.execute({
+      model: "big-pickle",
+      body: { messages: [{ role: "user", content: "hi" }] },
+      stream: true,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+    });
+
+    // Bootstrap failed → no retry → original 403 returned.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.response.status).toBe(403);
   });
 });
 
