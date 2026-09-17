@@ -17,6 +17,40 @@ const input = [{
 }];
 
 describe("OpenCode Free Muse Spark thinking", () => {
+  it("keeps x-opencode-session request-local when requests overlap", () => {
+    const executor = new OpenCodeExecutor();
+    const first = executor.prepareRequestCredentials({
+      body: { messages: [{ role: "user", content: "first" }] },
+      credentials: { connectionId: "connection-a", rawHeaders: {} },
+      providerSessionId: "conversation-first",
+    });
+    const second = executor.prepareRequestCredentials({
+      body: { messages: [{ role: "user", content: "second" }] },
+      credentials: { connectionId: "connection-b", rawHeaders: {} },
+      providerSessionId: "conversation-second",
+    });
+
+    const firstHeaders = executor.buildHeaders(first, true);
+    const secondHeaders = executor.buildHeaders(second, true);
+
+    expect(firstHeaders["x-opencode-session"]).toBe("conversation-first");
+    expect(secondHeaders["x-opencode-session"]).toBe("conversation-second");
+  });
+
+  it("preserves a valid downstream session header", () => {
+    const executor = new OpenCodeExecutor();
+    const credentials = executor.prepareRequestCredentials({
+      body: { messages: [{ role: "user", content: "hello" }] },
+      credentials: {
+        connectionId: "connection-a",
+        rawHeaders: { "X-OpenCode-Session": " native-session " },
+      },
+      providerSessionId: "translated-session",
+    });
+
+    expect(executor.buildHeaders(credentials, true)["x-opencode-session"]).toBe("native-session");
+  });
+
   it("advertises reasoning and the requested model limits", () => {
     expect(PROVIDER_MODELS.oc?.some((model) => model.id === MODEL)).toBe(true);
     expect(PROVIDER_MODELS.oc?.some((model) => model.id === "muse-spark-1.3-contributor-free")).toBe(true);

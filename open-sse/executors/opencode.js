@@ -7,6 +7,7 @@ import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
 
 const OPENCODE_UA = "opencode";
+const OPENCODE_SESSION_FIELD = "_opencodeSession";
 // Models served by /zen/v1/responses; every other model stays on /chat/completions.
 const RESPONSES_MODELS = new Set([
   "muse-spark-1.2-contributor-free",
@@ -21,6 +22,12 @@ function generateSessionId() {
   return `ses_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
+function normalizeHeaderValue(value) {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim();
+  return normalized.length <= 256 ? normalized : "";
+}
+
 // Strip the thinking suffix "model(level)" so registry lookups hit the base id.
 function baseModelId(model) {
   return String(model || "").replace(/\([^()]+\)\s*$/, "").trim();
@@ -33,6 +40,13 @@ function isResponsesModel(model) {
 
 function resolveOpencodeSession(body, credentials) {
   const headers = credentials?.rawHeaders || {};
+  const native = Object.entries(headers).find(([key]) => key.toLowerCase() === "x-opencode-session")?.[1];
+  if (typeof native === "string" && native.trim() && native.trim().length <= 256) return native.trim();
+
+  const providerSessionId = typeof credentials?.providerSessionId === "string"
+    ? credentials.providerSessionId.trim()
+    : "";
+  if (providerSessionId && providerSessionId.length <= 256) return providerSessionId;
   return resolveSessionId({
     headers,
     body,
@@ -68,11 +82,25 @@ function normalizeOpencodeReasoning(model, body) {
 export class OpenCodeExecutor extends BaseExecutor {
   constructor() {
     super("opencode", PROVIDERS.opencode);
-    this._currentSessionId = null;
+  }
+
+  prepareRequestCredentials({ body, credentials, providerSessionId } = {}) {
+    const sourceCredentials = credentials || {};
+    return {
+      ...sourceCredentials,
+      [OPENCODE_SESSION_FIELD]: resolveOpencodeSession(body, {
+        ...sourceCredentials,
+        providerSessionId,
+      }),
+    };
+  }
+
+  async execute(args) {
+    const credentials = this.prepareRequestCredentials(args);
+    return super.execute({ ...args, credentials });
   }
 
   transformRequest(model, body, stream, credentials) {
-    this._currentSessionId = resolveOpencodeSession(body, credentials);
     if (isResponsesModel(model)) {
       // Responses API names the output cap max_output_tokens and takes thinking
       // as reasoning:{effort,summary} — normalize the Chat fields at this boundary.
@@ -115,7 +143,9 @@ export class OpenCodeExecutor extends BaseExecutor {
       "Authorization": `Bearer ${apiKey}`,
       "User-Agent": isOpencodeDownstream ? downstreamUa : OPENCODE_UA,
       "x-opencode-client": lower["x-opencode-client"] || "desktop",
-      "x-opencode-session": lower["x-opencode-session"] || this._currentSessionId || generateSessionId(),
+      "x-opencode-session": credentials?.[OPENCODE_SESSION_FIELD]
+        || normalizeHeaderValue(lower["x-opencode-session"])
+        || generateSessionId(),
       "x-opencode-request": lower["x-opencode-request"] || generateRequestId(),
       "x-opencode-project": lower["x-opencode-project"] || "global",
       "Accept": stream ? "text/event-stream" : "*/*",
