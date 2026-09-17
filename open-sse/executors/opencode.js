@@ -5,6 +5,16 @@ import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
+import {
+  OPENCODE_FREE_ERROR_STATUSES,
+  OPENCODE_FREE_ERROR_TEXTS,
+  OPENCODE_NATIVE_SESSION_CACHE,
+  OPENCODE_SESSION_RETRY,
+} from "../config/opencodeFreeSession.js";
+import * as freeSessionConfig from "../config/opencodeFreeSession.js";
+import { opencodeNativeSessionCache } from "../utils/opencodeNativeSessionCache.js";
+import { isOpenCodeFreeError, hasNativeSessionContext } from "../utils/opencodeFreeSessionError.js";
+import { proxyAwareFetch } from "../utils/proxyFetch.js";
 
 // OpenCode Console rejects the anonymous free-tier token unless the request
 // identifies a sufficiently recent OpenCode client. Keep this version at or
@@ -14,6 +24,11 @@ const OPENCODE_UA = "opencode/1.18.26";
 const OPENCODE_SESSION_FIELD = "_opencodeSession";
 const OPENCODE_SESSION_HEADER = "x-session-id";
 const OPENCODE_SESSION_AFFINITY_HEADER = "x-session-affinity";
+const NATIVE_SESSION_CACHE_KEY = "default";
+// How long to keep a cached session context around. Native sessions are
+// long-lived but we bound the TTL to avoid replaying a stale/invalidated id.
+const NATIVE_SESSION_TTL_MS = OPENCODE_NATIVE_SESSION_CACHE.ttlMs;
+
 // Models served by /zen/v1/responses; every other model stays on /chat/completions.
 const RESPONSES_MODELS = new Set([
   "muse-spark-1.2-contributor-free",
@@ -95,6 +110,53 @@ function normalizeOpencodeReasoning(model, body) {
   delete body.reasoning_effort;
 }
 
+/**
+ * Read a config-driven DC rotation hook for the session-retry path.
+ * The hook may return a base URL (string) or a promise resolving to one.
+ * Returns null when no rotation is configured.
+ */
+function resolveRotationBaseUrl() {
+  const transport = PROVIDERS?.opencode?.transport;
+  const sessionRetry = transport?.sessionRetry;
+  if (sessionRetry == null) return null;
+  const hook = typeof sessionRetry === "object" ? sessionRetry.baseUrlFn : transport.baseUrlFn;
+  if (typeof hook !== "function") return null;
+  try {
+    return hook();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build headers that replay a cached native session context exactly as the
+ * native OpenCode CLI sends them, preserving the original auth token and
+ * content-type while overriding the session + user-agent fields.
+ */
+function buildNativeReplayHeaders(nativeCtx, credentials, stream = true) {
+  const apiKey = typeof credentials?.accessToken === "string"
+    && credentials.accessToken.trim() !== ""
+    && credentials.accessToken !== "public"
+    ? credentials.accessToken
+    : "public";
+
+  const session = normalizeHeaderValue(nativeCtx.sessionId) || generateSessionId();
+  const ua = nativeCtx.userAgent || OPENCODE_UA;
+
+  return {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${apiKey}`,
+    "User-Agent": ua,
+    "x-opencode-client": "desktop",
+    "x-opencode-session": session,
+    "x-opencode-request": generateRequestId(),
+    "x-opencode-project": "global",
+    [OPENCODE_SESSION_HEADER]: session,
+    [OPENCODE_SESSION_AFFINITY_HEADER]: session,
+    "Accept": stream ? "text/event-stream" : "*/*",
+  };
+}
+
 export class OpenCodeExecutor extends BaseExecutor {
   constructor() {
     super("opencode", PROVIDERS.opencode);
@@ -112,8 +174,132 @@ export class OpenCodeExecutor extends BaseExecutor {
   }
 
   async execute(args) {
+    const { model } = args;
     const credentials = this.prepareRequestCredentials(args);
-    return super.execute({ ...args, credentials });
+    const result = await super.execute({ ...args, credentials });
+
+    // Capture a successful response's session context for future free-tier
+    // recovery. We store the request-local session id, the effective UA, and a
+    // representative body shape that the native CLI would have sent.
+    if (result?.response && result.response.ok) {
+      const session = normalizeHeaderValue(credentials?.[OPENCODE_SESSION_FIELD])
+        || normalizeHeaderValue(result.headers?.[OPENCODE_SESSION_HEADER]);
+      if (session) {
+        const ua = result.headers?.["user-agent"] || OPENCODE_UA;
+        const bodyForReplay = result.transformedBody
+          ? { ...result.transformedBody }
+          : null;
+        opencodeNativeSessionCache.set(
+          { sessionId: session, userAgent: ua, requestBody: bodyForReplay },
+          NATIVE_SESSION_CACHE_KEY,
+        );
+      }
+    }
+
+    // Free-tier recovery: if the upstream rejected us, replay using the cached
+    // native session context (if available) and optionally rotate the DC.
+    if (result?.response && !result.response.ok) {
+      const isFreeError = await isOpenCodeFreeError(result.response);
+      if (isFreeError) {
+        const retryResult = await this._retryWithNativeSession(args, credentials, model);
+        if (retryResult) return retryResult;
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Replay the failed request using the cached native session context.
+   *
+   * @param {object} args - Original execute args (model, body, stream, etc.)
+   * @param {object} credentials - Resolved credentials with session id
+   * @param {string} model - Model being requested
+   * @returns {Promise<{response,url,headers,transformedBody}|null>}
+   */
+  async _retryWithNativeSession(args, credentials, model) {
+    const { maxAttempts, delayMs } = OPENCODE_SESSION_RETRY;
+    if (maxAttempts <= 0) return null;
+
+    const nativeCtx = opencodeNativeSessionCache.get(NATIVE_SESSION_CACHE_KEY);
+    if (!nativeCtx) return null;
+
+    const { body, stream, signal, log, proxyOptions } = args;
+
+    // Determine the base URL for the retry: config-driven rotation hook first,
+    // then fall back to the original config base URL.
+    const currentBase = this.config.baseUrl;
+    let retryBase = currentBase;
+    const rotateUpstream = freeSessionConfig.OPENCODE_FREE_SESSION_ROTATION?.rotateUpstream
+      || this.config?.sessionRotation?.rotateUpstream;
+    if (typeof rotateUpstream === "function") {
+      try { retryBase = await (rotateUpstream(this.provider, currentBase) || currentBase); } catch { /* fail open */ }
+    }
+
+    // Build the native-replay URL and headers.
+    const isResp = isResponsesModel(model);
+    const url = isResp
+      ? `${retryBase}/zen/v1/responses`
+      : `${retryBase}/zen/v1/chat/completions`;
+
+    // Transform the body the same way the happy path does (fresh clone so we
+    // don't mutate the caller's object again).
+    if (!body || typeof body !== "object" || Array.isArray(body) || !Array.isArray(body.messages)) return null;
+    const template = nativeCtx.nativeBody || nativeCtx.requestBody;
+    const bodyClone = template && typeof template === "object" ? JSON.parse(JSON.stringify(template)) : {};
+    Object.assign(bodyClone, JSON.parse(JSON.stringify(body)));
+    bodyClone.model = model;
+    bodyClone.messages = body.messages;
+    bodyClone.stream = stream !== false;
+    bodyClone.store = false;
+    if (bodyClone.tool_choice === undefined) bodyClone.tool_choice = "auto";
+    const transformedBody = this.transformRequest(model, bodyClone, stream, credentials);
+    const nativeHeaders = this.buildCachedHeaders(nativeCtx, credentials, stream);
+
+    log?.debug?.("RETRY", `OpenCode free-tier error, replaying native session ${nativeCtx.sessionId?.slice(0, 20)}… on ${url}`);
+
+    // Wait before retry (configurable delay, default 0).
+    const waitMs = typeof delayMs === "number" && delayMs > 0 ? delayMs : 0;
+    if (waitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+
+    // Single retry attempt (OPENCODE_SESSION_RETRY.maxAttempts is 1).
+    const connectCtrl = new AbortController();
+    const connectTimer = setTimeout(
+      () => connectCtrl.abort(new Error("fetch connect timeout")),
+      this.config?.timeoutMs || 60000,
+    );
+    const mergedSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
+
+    try {
+      const response = await proxyAwareFetch(url, {
+        method: "POST",
+        headers: nativeHeaders,
+        body: JSON.stringify(transformedBody),
+        signal: mergedSignal,
+      }, proxyOptions);
+      clearTimeout(connectTimer);
+
+      // If the retry succeeds, update the cache timestamp by refreshing the
+      // entry with the same context (keeps it alive for the next caller).
+      if (response.ok) {
+        opencodeNativeSessionCache.set(
+          { sessionId: nativeCtx.sessionId, userAgent: nativeCtx.userAgent, requestBody: null },
+          NATIVE_SESSION_CACHE_KEY,
+        );
+      }
+
+      return { response, url, headers: nativeHeaders, transformedBody };
+    } catch (error) {
+      clearTimeout(connectTimer);
+      log?.warn?.("RETRY", `OpenCode native session replay failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  buildCachedHeaders(nativeCtx, credentials, stream = true) {
+    return buildNativeReplayHeaders(nativeCtx, credentials, stream);
   }
 
   transformRequest(model, body, stream, credentials) {
