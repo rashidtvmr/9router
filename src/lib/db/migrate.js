@@ -294,4 +294,27 @@ export async function runMigrationOnce(adapter) {
   const newVer = getAppVersion();
   const oldVer = getMetaSync(adapter, "appVersion", null);
   if (oldVer !== newVer) setMetaSync(adapter, "appVersion", newVer);
+
+  // Seed relays on existing installs too: versioned migrations only run the
+  // delta (v1→v2 runs 002), so legacy DBs get the pools automatically.
+  // Belt-and-braces: also run the seed when the pools table exists but holds
+  // none of the default URLs (e.g. a DB that somehow skipped the migration).
+  // User pools are matched by proxyUrl and never touched.
+  try {
+    const needed = (await import("./seeds/defaultRelayPools.js")).DEFAULT_RELAY_POOLS
+      .map((p) => p?.proxyUrl).filter(Boolean);
+    if (needed.length) {
+      const have = new Set(
+        (adapter.all(`SELECT data FROM proxyPools`) || []).map((r) => {
+          try { return JSON.parse(r.data)?.proxyUrl; } catch { return null; }
+        }).filter(Boolean)
+      );
+      if (!needed.some((u) => have.has(u))) {
+        const m002 = (await import("./migrations/002-seed-relay-pools.js")).default;
+        adapter.transaction(() => m002.up(adapter));
+      }
+    }
+  } catch (e) {
+    console.warn(`[DB][migrate] relay seed check failed (continuing): ${e.message}`);
+  }
 }
