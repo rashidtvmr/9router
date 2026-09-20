@@ -472,3 +472,89 @@ describe("OpenCodeExecutor — non-free-tier errors do not trigger replay", () =
     expect(result.response.status).toBe(500);
   });
 });
+
+describe("OpenCodeExecutor — compaction routing", () => {
+  it("routes _compact to the compact endpoint and strips the flag from the body", async () => {
+    const executor = makeExecutor();
+    fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
+
+    await executor.execute({
+      model: "big-pickle",
+      body: { _compact: true, messages: [{ role: "user", content: "hi" }] },
+      stream: true,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-compact",
+    });
+
+    const callArgs = fetchMock.mock.calls[0];
+    const url = callArgs[0];
+    const body = JSON.parse(callArgs[1].body);
+
+    expect(url).toBe("https://opencode.ai/zen/v1/chat/completions/compact");
+    expect(body._compact).toBeUndefined();
+    expect(executor._isCompact).toBe(true);
+  });
+
+  it("routes _compact on a responses model to /zen/v1/responses/compact", async () => {
+    const executor = makeExecutor();
+    fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
+
+    await executor.execute({
+      model: "muse-spark-1.2-contributor-free",
+      body: { _compact: true, messages: [{ role: "user", content: "hi" }] },
+      stream: true,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-compact-resp",
+    });
+
+    const callArgs = fetchMock.mock.calls[0];
+    const url = callArgs[0];
+
+    expect(url).toBe("https://opencode.ai/zen/v1/responses/compact");
+  });
+
+  it("routes compact requests on retry (FreeTierError) to the compact endpoint", async () => {
+    opencodeNativeSessionCache.set({
+      sessionId: "ses-compact-retry",
+      userAgent: "opencode/1.18.26",
+      requestBody: null,
+    }, "default");
+
+    const executor = makeExecutor();
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(403, '{"error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}}'),
+    );
+    fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
+
+    await executor.execute({
+      model: "big-pickle",
+      body: { _compact: true, messages: [{ role: "user", content: "hi" }] },
+      stream: true,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-compact-retry",
+    });
+
+    const retryUrl = fetchMock.mock.calls[1][0];
+    const retryBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+
+    expect(retryUrl).toBe("https://opencode.ai/zen/v1/chat/completions/compact");
+    expect(retryBody._compact).toBeUndefined();
+  });
+
+  it("does not route to compact endpoint for non-compact requests", async () => {
+    const executor = makeExecutor();
+    fetchMock.mockResolvedValueOnce(makeResponse(200, "ok"));
+
+    await executor.execute({
+      model: "big-pickle",
+      body: { messages: [{ role: "user", content: "hi" }] },
+      stream: true,
+      credentials: { rawHeaders: {}, accessToken: "public" },
+      providerSessionId: "synth-normal",
+    });
+
+    const url = fetchMock.mock.calls[0][0];
+    expect(url).toBe("https://opencode.ai/zen/v1/chat/completions");
+    expect(executor._isCompact).toBe(false);
+  });
+});

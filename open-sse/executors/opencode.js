@@ -163,6 +163,7 @@ function buildNativeReplayHeaders(nativeCtx, credentials, stream = true) {
 export class OpenCodeExecutor extends BaseExecutor {
   constructor() {
     super("opencode", PROVIDERS.opencode);
+    this._isCompact = false;
   }
 
   prepareRequestCredentials({ body, credentials, providerSessionId } = {}) {
@@ -178,6 +179,16 @@ export class OpenCodeExecutor extends BaseExecutor {
 
   async execute(args) {
     const { model } = args;
+    // Capture the compact flag before super.execute() runs transformRequest,
+    // which deletes _compact from the body. We need this for the retry path
+    // to route compaction requests to the correct endpoint.
+    const isCompact = !!(args.body && args.body._compact);
+    // Delete _compact before super.execute() so it never reaches upstream in
+    // the initial request body. transformRequest also strips it, but we set
+    // _isCompact here so it survives even if transformRequest hasn't run yet.
+    if (args.body) delete args.body._compact;
+
+    this._isCompact = isCompact;
     const credentials = this.prepareRequestCredentials(args);
     const result = await super.execute({ ...args, credentials });
 
@@ -305,9 +316,10 @@ export class OpenCodeExecutor extends BaseExecutor {
 
     // Build the native-replay URL and headers.
     const isResp = isResponsesModel(model);
+    const compactSuffix = this._isCompact ? "/compact" : "";
     const url = isResp
-      ? `${retryBase}/zen/v1/responses`
-      : `${retryBase}/zen/v1/chat/completions`;
+      ? `${retryBase}/zen/v1/responses${compactSuffix}`
+      : `${retryBase}/zen/v1/chat/completions${compactSuffix}`;
 
     // Transform the body the same way the happy path does (fresh clone so we
     // don't mutate the caller's object again).
@@ -319,6 +331,9 @@ export class OpenCodeExecutor extends BaseExecutor {
     bodyClone.messages = body.messages;
     bodyClone.stream = stream !== false;
     bodyClone.store = false;
+    // Ensure _compact is stripped from the retry body (it may persist from
+    // the original body since we only deleted it on args.body, not a deep copy).
+    delete bodyClone._compact;
     if (bodyClone.tool_choice === undefined) bodyClone.tool_choice = "auto";
     const transformedBody = this.transformRequest(model, bodyClone, stream, credentials);
     const nativeHeaders = this.buildCachedHeaders(nativeCtx, credentials, stream);
@@ -370,6 +385,18 @@ export class OpenCodeExecutor extends BaseExecutor {
   }
 
   transformRequest(model, body, stream, credentials) {
+    // Capture the compact flag before it gets sent upstream (OpenCode's zen API
+    // does not understand the internal _compact field and rejects the request
+    // with FreeTierError when it sees an unrecognised body key from a non-native
+    // client). The flag is consumed by buildUrl to route to the compact endpoint.
+    // Only set _isCompact if the field is present, so the retry path (which
+    // rebuilds the body without _compact) doesn't clobber the flag captured
+    // during execute().
+    if (body && "_compact" in body) {
+      this._isCompact = !!body._compact;
+      delete body._compact;
+    }
+
     if (isResponsesModel(model)) {
       // Responses API names the output cap max_output_tokens and takes thinking
       // as reasoning:{effort,summary} — normalize the Chat fields at this boundary.
@@ -386,9 +413,13 @@ export class OpenCodeExecutor extends BaseExecutor {
 
   buildUrl(model) {
     const base = this.config.baseUrl;
-    return isResponsesModel(model)
-      ? `${base}/zen/v1/responses`
-      : `${base}/zen/v1/chat/completions`;
+    const isCompact = this._isCompact;
+    if (isResponsesModel(model)) {
+      const baseResp = `${base}/zen/v1/responses`;
+      return isCompact ? `${baseResp}/compact` : baseResp;
+    }
+    const baseChat = `${base}/zen/v1/chat/completions`;
+    return isCompact ? `${baseChat}/compact` : baseChat;
   }
 
   buildHeaders(credentials, stream = true) {
