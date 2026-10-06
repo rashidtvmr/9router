@@ -158,6 +158,12 @@ export const MODEL_CAPABILITIES = {
   "muse-spark-1.3-contributor-free": { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 131072 },
   // OpenCode Free Union Alpha — multimodal (text+vision), 262K context, 131K max output
   "union-alpha": { vision: true, contextWindow: 262144, maxOutput: 131072 },
+
+  // Vyce models — Vyce provider wraps DeepSeek via 9router; exact entries needed
+  // because the model id contains "vyce/" which the *deepseek* pattern doesn't match
+  "vyce/deepseek-v4-flash": { vision: true, reasoning: true, thinkingFormat: "deepseek", thinkingEffortSupported: true, contextWindow: 200000, maxOutput: 128000 },
+  "vyce/deepseek-v4-flash-lr": { vision: true, reasoning: true, thinkingFormat: "deepseek", thinkingEffortSupported: true, contextWindow: 200000, maxOutput: 128000 },
+  "vyce/deepseek-v4.1": { vision: true, reasoning: true, thinkingFormat: "deepseek", thinkingEffortSupported: true, contextWindow: 200000, maxOutput: 128000 },
 };
 
 const KIRO_GPT_5_6_CAPABILITIES = { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 };
