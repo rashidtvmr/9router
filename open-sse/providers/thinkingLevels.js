@@ -70,7 +70,11 @@ const PATTERN_THINKING = [
   { provider: "codebuddy-intl", pattern: "deepseek-v4*", levels: ["low", "high", "xhigh"] },
 ];
 
-// Returns valid thinking levels for a model, or null when the model has no reasoning.
+// Returns the thinking levels a model NATIVELY accepts, or null when the model
+// has no reasoning. This set drives the wire-level clamp in
+// thinkingUnified.applyFormat — do NOT widen it to feed the UI picker, or every
+// provider would be offered a level its API rejects. Use
+// getSelectableThinkingLevels() for the picker.
 export function getThinkingLevels(provider, model) {
   if (provider === "kiro" && resolveKiroEffortPath(model) === null) return null;
   const caps = getCapabilitiesForModel(provider, model);
@@ -85,4 +89,23 @@ export function getThinkingLevels(provider, model) {
   let levels = modelLevels || hit?.levels || FORMAT_LEVELS[caps.thinkingFormat] || L.base;
   if (caps.thinkingCanDisable === false) levels = levels.filter((l) => l !== "none");
   return levels;
+}
+
+// Every effort rung the UI may offer, ascending. Providers implement wildly
+// different subsets of this (Gemini stops at "high", Z.ai at "high", Codex runs
+// to "ultra"), so this is the *selectable* ladder — not what any one API takes.
+export const THINKING_EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+/**
+ * Levels to OFFER in the picker for a model, or null when it cannot reason.
+ *
+ * Every reasoning model gets the full low→ultra ladder so effort can be chosen
+ * per model. Levels a provider does not natively implement are not dropped here:
+ * thinkingUnified.applyFormat downgrades them to the best rung the model does
+ * advertise, so picking "ultra" on Gemini yields its top effort instead of a
+ * 400. Clamping on the wire is what keeps this safe.
+ */
+export function getSelectableThinkingLevels(provider, model) {
+  if (!getThinkingLevels(provider, model)) return null;
+  return [...THINKING_EFFORT_LADDER];
 }
