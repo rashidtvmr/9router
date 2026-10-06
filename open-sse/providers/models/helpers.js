@@ -28,6 +28,17 @@ export function isMuseSparkModel(modelId) {
   return /^muse[-_]?spark(?:$|[-_:.\s])/i.test(base);
 }
 
+// OpenCode Zen free tier. Most free ids carry a "-free" suffix; a couple of
+// genuinely free ids upstream serves without one.
+const OPENCODE_FREE_MODEL_IDS = new Set(["big-pickle"]);
+
+export function isOpenCodeFreeModel(modelId) {
+  if (!modelId || typeof modelId !== "string") return false;
+  const clean = modelId.replace(/\([^()]+\)\s*$/, "").trim();
+  const base = clean.includes("/") ? clean.split("/").pop() : clean;
+  return base.endsWith("-free") || OPENCODE_FREE_MODEL_IDS.has(base);
+}
+
 // "model(level)" is a 9router thinking override; strip before matching.
 // Accepts both bare ids ("deepseek-v4-pro(max)") and provider-prefixed ones.
 export function isDeepSeekModel(modelId) {

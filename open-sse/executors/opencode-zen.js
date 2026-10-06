@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import { DefaultExecutor } from "./default.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
-import { isMuseSparkModel } from "../providers/models/helpers.js";
+import { isMuseSparkModel, isOpenCodeFreeModel } from "../providers/models/helpers.js";
+import { OPENCODE_ZEN_FREE_ROTATION } from "../config/opencodeFreeSession.js";
+import { isOpenCodeFreeError } from "../utils/opencodeFreeSessionError.js";
 import {
   normalizeResponsesInput,
   clampResponsesCallId,
@@ -16,6 +18,43 @@ const MAX_SESSION_LENGTH = 256;
 const RESPONSES_BASE_URL = "https://opencode.ai/zen/v1/responses";
 const MAX_TOOL_NAME_LEN = 128;
 const OPENCODE_UA = "opencode/1.18.31";
+const ZEN_ORIGIN = "https://opencode.ai";
+
+// Per-request carrier for a rotated upstream origin. Executor instances are
+// shared singletons (see executors/index.js), so rotation state has to ride on
+// the request's credentials — an instance field would leak across concurrent
+// requests.
+const ROTATED_ORIGIN = Symbol("opencodeZenRotatedOrigin");
+
+// Swaps only the origin so every Zen path (/zen/v1/chat/completions,
+// /zen/v1/messages, /zen/v1/responses) keeps working against a relay front.
+function withRotatedOrigin(url, origin) {
+  if (!origin) return url;
+  try {
+    const source = new URL(url);
+    return `${new URL(origin).origin}${source.pathname}${source.search}`;
+  } catch {
+    return url;
+  }
+}
+
+// Process-lifetime probe counters for the keyed-lane rotation experiment.
+// The anonymous lane's quota is IP-keyed; a keyed connection may be quota'd
+// against the API key instead, in which case rotating the IP recovers nothing.
+// These counters answer that empirically instead of by assumption. They reset
+// on restart — this is telemetry, not accounting.
+const rotationStats = { attempts: 0, recovered: 0, exhausted: 0 };
+
+export function openCodeZenRotationStats() {
+  const { attempts, recovered, exhausted } = rotationStats;
+  return {
+    attempts,
+    recovered,
+    exhausted,
+    // null while there is nothing to judge, so callers never read 0% as "broken".
+    recoveryRate: attempts === 0 ? null : recovered / attempts,
+  };
+}
 export const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 // Free-tier fingerprint (mirrors opencode executor, PR #4132): upstream 403s
@@ -233,8 +272,10 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
     // Muse Spark lives on /responses even when a stale runtimeTransport leaks in.
-    if (isResponsesModel(model)) return RESPONSES_BASE_URL;
-    return super.buildUrl(model, stream, urlIndex, credentials);
+    const url = isResponsesModel(model)
+      ? RESPONSES_BASE_URL
+      : super.buildUrl(model, stream, urlIndex, credentials);
+    return withRotatedOrigin(url, credentials?.[ROTATED_ORIGIN]);
   }
 
   prepareRequestCredentials({ body, credentials, providerSessionId, clientTool } = {}) {
@@ -255,7 +296,77 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
 
   async execute(args) {
     const credentials = this.prepareRequestCredentials(args);
-    return super.execute({ ...args, credentials });
+    const result = await super.execute({ ...args, credentials });
+
+    if (!OPENCODE_ZEN_FREE_ROTATION.enabled) return result;
+    // Only the free tier is plausibly IP-quota'd. A paid model's 429 is a real
+    // rate limit, and bouncing it through a relay just adds latency.
+    if (!isOpenCodeFreeModel(args.model)) return result;
+    if (!result?.response || result.response.ok) return result;
+    if (!(await isOpenCodeFreeError(result.response))) return result;
+
+    return this._retryOnRotatedOrigin(args, credentials, result);
+  }
+
+  /**
+   * Replay a free-tier rejection against a different egress IP.
+   *
+   * Fail-open throughout: any problem resolving a relay pool, or a rotated
+   * origin that turns out to be the one we are already on, returns the
+   * original result untouched.
+   */
+  async _retryOnRotatedOrigin(args, credentials, first) {
+    const { log } = args;
+    let currentOrigin = ZEN_ORIGIN;
+    try {
+      currentOrigin = new URL(first.url).origin;
+    } catch { /* keep the default */ }
+
+    let rotated;
+    try {
+      rotated = await OPENCODE_ZEN_FREE_ROTATION.rotateUpstream(this.provider, currentOrigin);
+    } catch (error) {
+      log?.warn?.("ROTATE", `opencode-zen rotation skipped: ${error.message}`);
+      return first;
+    }
+
+    let rotatedOrigin;
+    try {
+      rotatedOrigin = rotated ? new URL(rotated).origin : "";
+    } catch {
+      rotatedOrigin = "";
+    }
+    if (!rotatedOrigin || rotatedOrigin === currentOrigin) {
+      log?.debug?.("ROTATE", `opencode-zen free-tier ${first.response.status} with no alternate relay available`);
+      return first;
+    }
+
+    rotationStats.attempts += 1;
+    log?.debug?.("ROTATE", `opencode-zen free-tier ${first.response.status} on ${args.model}; retrying via ${rotatedOrigin}`);
+
+    let retried;
+    try {
+      retried = await super.execute({
+        ...args,
+        credentials: { ...credentials, [ROTATED_ORIGIN]: rotatedOrigin },
+      });
+    } catch (error) {
+      // The replay is strictly best-effort — surface the original failure so a
+      // relay problem never masks the real upstream error.
+      rotationStats.exhausted += 1;
+      log?.warn?.("ROTATE", `opencode-zen rotated retry failed (${error.message}); returning original response`);
+      return first;
+    }
+
+    if (retried?.response?.ok) {
+      rotationStats.recovered += 1;
+      log?.debug?.("ROTATE", `opencode-zen rotation recovered ${args.model} via ${rotatedOrigin}`);
+      return retried;
+    }
+
+    rotationStats.exhausted += 1;
+    log?.debug?.("ROTATE", `opencode-zen rotation did not recover ${args.model} (${retried?.response?.status ?? "no response"})`);
+    return first;
   }
 
   buildHeaders(credentials, stream = true, url, model) {

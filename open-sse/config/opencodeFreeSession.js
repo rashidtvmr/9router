@@ -67,3 +67,19 @@ export const OPENCODE_FREE_SESSION_ROTATION = {
 // Compatibility aliases for callers introduced during the initial rollout.
 export const OPENCODE_NATIVE_SESSION_CACHE = OPENCODE_FREE_SESSION_ROTATION;
 export const OPENCODE_SESSION_RETRY = { maxAttempts: 1, delayMs: 0 };
+
+/**
+ * Free-tier IP rotation for the keyed Zen lane (opencode-zen).
+ *
+ * The same relay-pool round-robin the anonymous lane uses, applied to Zen's
+ * "-free" models. Whether this actually recovers anything is an open question:
+ * the anonymous lane's quota is IP-keyed, but a keyed connection may well be
+ * quota'd against the API key instead, in which case a new egress IP changes
+ * nothing and the retry only costs latency. openCodeZenRotationStats() exposes
+ * live hit-rate counters so that can be measured instead of assumed.
+ */
+export const OPENCODE_ZEN_FREE_ROTATION = {
+  enabled: true,
+  maxAttempts: 1,
+  rotateUpstream: OPENCODE_FREE_SESSION_ROTATION.rotateUpstream,
+};
