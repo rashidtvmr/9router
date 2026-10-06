@@ -177,7 +177,8 @@ function toKimiReasoningEffort(cfg) {
   const level = toLevel(cfg);
   if (level === "auto") return "high";
   if (level === "minimal") return "low";
-  if (level === "xhigh") return "max";
+  // "max" is Kimi's top rung; xhigh/ultra both collapse onto it.
+  if (level === "xhigh" || level === "ultra") return "max";
   if (["low", "medium", "high", "max"].includes(level)) return level;
   return null;
 }
@@ -271,9 +272,12 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
       if (canDisable) body.thinking = { type: "adaptive", ...(display ? { display } : {}) };
       else delete body.thinking;
       const level = toLevel(eff);
-      // xhigh is model-gated (Opus/Sonnet 4.6 reject it) — clamp when not advertised.
+      // xhigh is model-gated (Opus/Sonnet 4.6 reject it); max/ultra are gated
+      // too now that the picker offers the full ladder — clamp to the best rung
+      // this model advertises rather than sending a level the API rejects.
       body.output_config = { effort: level === "auto" ? "high"
-        : level === "xhigh" && !supportedLevels?.includes("xhigh") ? "high" : level };
+        : level === "xhigh" && !supportedLevels?.includes("xhigh") ? "high"
+        : normalizeOpenAILevel(level, supportedLevels) };
       break;
     }
     case "claude-budget": {
@@ -283,6 +287,8 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
       break;
     }
     case "gemini-level": {
+      // Gemini's thinkingLevel tops out at "high"; effortToThinkingLevel folds
+      // xhigh/max down, and ultra needs folding too now the picker offers it.
       const level = none ? "minimal" : toGeminiThinkingLevel(eff);
       setGeminiThinking(body, { thinkingLevel: level, includeThoughts: level !== "minimal" });
       ensureGeminiOutputFloor(body, geminiLevelOutputFloor(level), caps);
@@ -323,11 +329,11 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
     case "deepseek": {
       if (none && canDisable) { body.thinking = { type: "disabled" }; break; }
       body.thinking = { type: "enabled" };
-      // DeepSeek: low/medium→high, xhigh/max→max. Some backends (mimo v2.5-pro/v2.6
+      // DeepSeek: low/medium→high, xhigh/max/ultra→max. Some backends (mimo v2.5-pro/v2.6
       // on opencode-go, probed live) 400 on "max" — clamp to high when the declared
       // levels exclude it.
       const level = toLevel(eff);
-      const want = level === "xhigh" || level === "max" ? "max" : "high";
+      const want = level === "xhigh" || level === "max" || level === "ultra" ? "max" : "high";
       body.reasoning_effort = want === "max" && supportedLevels && !supportedLevels.includes("max") ? "high" : want;
       break;
     }
@@ -351,7 +357,7 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
     case "step": {
       if (none && canDisable) break;
       const level = toLevel(eff);
-      if (level) body.reasoning_effort = level === "xhigh" || level === "max" ? "high" : level;
+      if (level) body.reasoning_effort = ["xhigh", "max", "ultra"].includes(level) ? "high" : level;
       break;
     }
     case "tokenrouter": {
@@ -360,7 +366,10 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
       // "none" → omit the field so the upstream default applies; pass levels through.
       if (none || eff.mode === "auto") break;
       const level = toLevel(eff);
-      if (level) body.reasoning_effort = level;
+      // "max" is native here and must pass through untouched; only "ultra" has no
+      // meaning upstream, so it folds onto max rather than through supportedLevels
+      // (this format has no FORMAT_LEVELS entry, so the clamp would pick xhigh).
+      if (level) body.reasoning_effort = level === "ultra" ? "max" : level;
       break;
     }
     case "kiro":
@@ -374,7 +383,7 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
         break;
       }
       const level = toLevel(eff);
-      if (level) body.params.reasoning_effort = level;
+      if (level) body.params.reasoning_effort = normalizeOpenAILevel(level, supportedLevels);
       break;
     }
     default:

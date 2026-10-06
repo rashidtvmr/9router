@@ -28,7 +28,9 @@ export function effortToBudget(effort) {
 export function effortToThinkingLevel(effort) {
   const e = String(effort).toLowerCase().trim();
   if (e === "none" || e === "off") return "minimal";
-  if (e === "xhigh" || e === "max") return "high";
+  // Gemini thinkingLevel only accepts minimal|low|medium|high. Everything above
+  // "high" folds down, including "ultra" now that the picker offers the full ladder.
+  if (e === "xhigh" || e === "max" || e === "ultra") return "high";
   return e;
 }
 
