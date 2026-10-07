@@ -30,6 +30,11 @@ export function isMuseSparkModel(modelId) {
 
 // OpenCode Zen free tier. Most free ids carry a "-free" suffix; a couple of
 // genuinely free ids upstream serves without one.
+//
+// "union-alpha" is deliberately NOT listed: the anonymous lane's registry calls it
+// "Union Alpha Free" but the keyed Zen registry calls it "Union Alpha", and the
+// code cannot settle which is authoritative. Excluding it costs nothing (no
+// wasted retry); including it wrongly would spend a second request per failure.
 const OPENCODE_FREE_MODEL_IDS = new Set(["big-pickle"]);
 
 export function isOpenCodeFreeModel(modelId) {

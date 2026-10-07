@@ -18,7 +18,10 @@ export const OPENCODE_NATIVE_SESSION_BOOTSTRAP = {
 };
 
 // Round-robin state for Lambda relay IP rotation (in-memory, per-process).
-let relayRoundRobinIndex = 0;
+// Kept per-lane: sharing one cursor meant zen retries perturbed the anonymous
+// lane's relay distribution (and vice versa), which muddies both the rotation
+// experiment and cache behaviour on the relays.
+const relayRoundRobin = { opencode: 0, "opencode-zen": 0 };
 
 /**
  * Rotate the upstream base URL to a different AWS Lambda relay pool on retry.
@@ -33,7 +36,7 @@ export const OPENCODE_FREE_SESSION_ROTATION = {
   enabled: true,
   ttlMs: 300000,
   maxEntries: 8,
-  rotateUpstream: async (_provider, currentBaseUrl) => {
+  rotateUpstream: async (provider, currentBaseUrl) => {
     // Dynamic import to avoid pulling DB deps at module load time.
     const { getProxyPools } = await import("@/lib/localDb.js");
     const RELAY_TYPES = new Set(["vercel", "cloudflare", "deno"]);
@@ -46,18 +49,19 @@ export const OPENCODE_FREE_SESSION_ROTATION = {
 
       // Round-robin across relays, skipping the pool whose URL matches the
       // one we're already on, so we always get a genuinely different egress IP.
+      const key = relayRoundRobin[provider] == null ? "opencode" : provider;
       const currentNormalized = currentBaseUrl.replace(/\/+$/, "");
       let rotated = null;
       for (let i = 0; i < relayPools.length; i += 1) {
-        const idx = (relayRoundRobinIndex + i) % relayPools.length;
-        relayRoundRobinIndex = (relayRoundRobinIndex + 1) % relayPools.length;
+        const idx = (relayRoundRobin[key] + i) % relayPools.length;
+        relayRoundRobin[key] = (relayRoundRobin[key] + 1) % relayPools.length;
         const candidate = relayPools[idx].replace(/\/+$/, "");
         if (candidate !== currentNormalized) {
           rotated = relayPools[idx];
           break;
         }
       }
-      return rotated || relayPools[relayRoundRobinIndex % relayPools.length];
+      return rotated || relayPools[relayRoundRobin[key] % relayPools.length];
     } catch {
       return currentBaseUrl;
     }

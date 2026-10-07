@@ -25,6 +25,9 @@ const { OpenCodeZenExecutor, openCodeZenRotationStats } = await import(
   "../../open-sse/executors/opencode-zen.js"
 );
 const { isOpenCodeFreeModel } = await import("../../open-sse/providers/models/helpers.js");
+const { isOpenCodeFreeError, isOpenCodeZenFreeTierError } = await import(
+  "../../open-sse/utils/opencodeFreeSessionError.js"
+);
 
 function makeResponse(status, bodyText = "") {
   const response = {
@@ -89,6 +92,35 @@ describe("isOpenCodeFreeModel", () => {
   });
 });
 
+describe("keyed-lane free-tier predicate", () => {
+  it("accepts free-tier wording on any watched status", async () => {
+    for (const body of ["FreeTierError", "quota exceeded", "free tier", "rate limit", "too many requests", "capacity"]) {
+      expect(await isOpenCodeZenFreeTierError(makeResponse(403, body))).toBe(true);
+      expect(await isOpenCodeZenFreeTierError(makeResponse(429, body))).toBe(true);
+    }
+  });
+
+  it("rejects an ordinary per-key 429", async () => {
+    expect(await isOpenCodeZenFreeTierError(makeResponse(429, ""))).toBe(false);
+    expect(await isOpenCodeZenFreeTierError(makeResponse(429, "slow down"))).toBe(false);
+  });
+
+  it("rejects a billing 402", async () => {
+    expect(await isOpenCodeZenFreeTierError(makeResponse(402, "insufficient credits"))).toBe(false);
+  });
+
+  it("still accepts a bare 403 (free-tier gate with no readable body)", async () => {
+    expect(await isOpenCodeZenFreeTierError(makeResponse(403, ""))).toBe(true);
+  });
+
+  it("leaves the anonymous-lane predicate short-circuiting 429/402", async () => {
+    // The keyed tightening must not leak into the anonymous lane, whose quota
+    // really is IP-keyed.
+    expect(await isOpenCodeFreeError(makeResponse(429, ""))).toBe(true);
+    expect(await isOpenCodeFreeError(makeResponse(402, ""))).toBe(true);
+  });
+});
+
 describe("opencode-zen free-tier IP rotation", () => {
   it("rotates the origin and recovers a free-tier 403", async () => {
     const result = await runExecutor("mimo-v2.6-flash-free", [
@@ -147,13 +179,31 @@ describe("opencode-zen free-tier IP rotation", () => {
   });
 
   it("returns the original response when the rotated retry also fails", async () => {
+    const before = openCodeZenRotationStats();
     const result = await runExecutor("mimo-v2.6-flash-free", [
       makeResponse(403, "FreeTierError"),
       makeResponse(403, "FreeTierError"),
     ]);
 
     expect(result.response.status).toBe(403);
-    expect(openCodeZenRotationStats().recoveryRate).toBe(0);
+    // Counters are module-level and shared across cases in this file, so assert
+    // the delta rather than an absolute rate.
+    const after = openCodeZenRotationStats();
+    expect(after.attempts).toBe(before.attempts + 1);
+    expect(after.recovered).toBe(before.recovered);
+    expect(after.exhausted).toBe(before.exhausted + 1);
+  });
+
+  it("does not spend a second request on an ordinary per-key 429", async () => {
+    const before = openCodeZenRotationStats().attempts;
+    const result = await runExecutor("mimo-v2.6-flash-free", [makeResponse(429, "slow down")]);
+
+    // A keyed connection's plain rate limit is not IP-keyed quota; rotating the
+    // egress origin would recover nothing and cost a full extra generation.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(rotateUpstreamMock).not.toHaveBeenCalled();
+    expect(openCodeZenRotationStats().attempts).toBe(before);
+    expect(result.response.status).toBe(429);
   });
 
   it("keeps rotation state off the shared executor instance", async () => {

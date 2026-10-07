@@ -3,7 +3,7 @@ import { DefaultExecutor } from "./default.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel, isOpenCodeFreeModel } from "../providers/models/helpers.js";
 import { OPENCODE_ZEN_FREE_ROTATION } from "../config/opencodeFreeSession.js";
-import { isOpenCodeFreeError } from "../utils/opencodeFreeSessionError.js";
+import { isOpenCodeZenFreeTierError } from "../utils/opencodeFreeSessionError.js";
 import {
   normalizeResponsesInput,
   clampResponsesCallId,
@@ -303,7 +303,10 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
     // rate limit, and bouncing it through a relay just adds latency.
     if (!isOpenCodeFreeModel(args.model)) return result;
     if (!result?.response || result.response.ok) return result;
-    if (!(await isOpenCodeFreeError(result.response))) return result;
+    // Keyed lane: require free-tier wording in the body. A bare 429 here is
+    // almost certainly a per-key rate limit, which no amount of IP rotation
+    // fixes — see isOpenCodeZenFreeTierError.
+    if (!(await isOpenCodeZenFreeTierError(result.response))) return result;
 
     return this._retryOnRotatedOrigin(args, credentials, result);
   }
