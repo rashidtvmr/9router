@@ -189,6 +189,12 @@ export const MODEL_CAPABILITIES = {
   "space-bunny-free":  { vision: true, videoInput: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 524288 },
   "space-bunny":       { vision: true, videoInput: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 524288 },
   "big-pickle":        { reasoning: true, thinkingFormat: "openai", contextWindow: 200000, maxOutput: 32000 },
+  // Free-lane GLM/DeepSeek: the anonymous /inference/v1 gateway is OpenAI-shaped
+  // and rejects the z.ai `thinking` object the global *glm-5.3* pattern sends
+  // (400: unknown field "thinking") — same class of failure opencode-go fixes
+  // above. Override so the wire carries reasoning_effort only.
+  "glm-5.3-flash-free":       { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 131072 },
+  "deepseek-v4.1-flash-free": { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 131072 },
   "exo-free":          { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 131072 },
   "fledge-alpha-free": { vision: true, reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 131072 },
   "longcat-2.0":             { reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 131072 },

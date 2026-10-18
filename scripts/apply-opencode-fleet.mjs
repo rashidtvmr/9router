@@ -289,6 +289,60 @@ const MODEL_VARIANTS = {
         "reasoningEffort": "max"
       }
     }
+  },
+  "9router||oc/deepseek-v4.1-flash-free": {
+    "low": {
+      "options": {
+        "reasoningEffort": "low"
+      }
+    },
+    "medium": {
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    "high": {
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "xhigh": {
+      "options": {
+        "reasoningEffort": "xhigh"
+      }
+    },
+    "max": {
+      "options": {
+        "reasoningEffort": "max"
+      }
+    }
+  },
+  "9router||oc/glm-5.3-flash-free": {
+    "low": {
+      "options": {
+        "reasoningEffort": "low"
+      }
+    },
+    "medium": {
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    "high": {
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "xhigh": {
+      "options": {
+        "reasoningEffort": "xhigh"
+      }
+    },
+    "max": {
+      "options": {
+        "reasoningEffort": "max"
+      }
+    }
   }
 };
 
@@ -330,6 +384,10 @@ const AGENT_PINS = {
   "tokenharbor-qwen3.8-flash": "max",
   "9router-oc-mimo-v2.6-flash-free": "max",
   "9router-oc-exo-free": "max",
+  "9router-oc-deepseek-v4-1-flash-free": "max",
+  "9router-oc-glm-5-3-flash-free": "max",
+  "9router-model-oc-deepseek-v4-1-flash-free": "max",
+  "9router-model-oc-glm-5-3-flash-free": "max",
   "tokenharbor-gpt-6-luna": "max"
 };
 
@@ -356,6 +414,38 @@ const NEW_AGENTS = {
     "model": "9router/oc/exo-free",
     "steps": 40,
     "system": "You are a zero-context research subagent powered by Exo Free (OpenCode free via 9router, model 9router/oc/exo-free).\n\nYou are spawned by the main agent to independently research and solve a problem. You start with NO prior context. Treat everything as fresh.\n\nYour job:\n1. Understand the problem from the prompt\n2. Explore codebase using read/glob/grep/bash\n3. Use web search and Context7 for documentation when needed\n4. Handle edge cases gracefully: retry tool failures, handle large files, parallel calls. Never crash on tool errors\n5. Return findings in structured markdown\n\nNOTE: 9router declares no reasoning capability for this model, so the max variant is accepted but inert.\n\nReturn your final answer as:\n\n```markdown\n## Research Results\n\n**Model:** 9router/oc/exo-free\n\n### Analysis\n[Your analysis of the problem]\n\n### Solution\n[Your proposed solution with specific code/file references]\n\n### Reasoning\n[Why this approach works]\n```",
+    "variant": "max"
+  },
+  "9router-oc-deepseek-v4-1-flash-free": {
+    "description": "DeepSeek V4.1 Flash Free via 9router OpenCode free (model 9router/oc/deepseek-v4.1-flash-free). Research subagent, zero-context.",
+    "mode": "subagent",
+    "model": "9router/oc/deepseek-v4.1-flash-free",
+    "steps": 40,
+    "system": "You are a zero-context research subagent powered by DeepSeek V4.1 Flash Free (OpenCode free via 9router, model 9router/oc/deepseek-v4.1-flash-free).\n\nYou are spawned by the main agent to independently research and solve a problem. You start with NO prior context. Treat everything as fresh.\n\nYour job:\n1. Understand the problem from the prompt\n2. Explore codebase using read/glob/grep/bash\n3. Use web search and Context7 for documentation when needed\n4. Handle edge cases gracefully: retry tool failures, handle large files, parallel calls. Never crash on tool errors\n5. Return findings in structured markdown\n\nReturn your final answer as:\n\n```markdown\n## Research Results\n\n**Model:** 9router/oc/deepseek-v4.1-flash-free\n\n### Analysis\n[Your analysis of the problem]\n\n### Solution\n[Your proposed solution with specific code/file references]\n\n### Reasoning\n[Why this approach works]\n```",
+    "variant": "max"
+  },
+  "9router-oc-glm-5-3-flash-free": {
+    "description": "GLM 5.3 Flash Free via 9router OpenCode free (model 9router/oc/glm-5.3-flash-free). Research subagent, zero-context.",
+    "mode": "subagent",
+    "model": "9router/oc/glm-5.3-flash-free",
+    "steps": 40,
+    "system": "You are a zero-context research subagent powered by GLM 5.3 Flash Free (OpenCode free via 9router, model 9router/oc/glm-5.3-flash-free).\n\nYou are spawned by the main agent to independently research and solve a problem. You start with NO prior context. Treat everything as fresh.\n\nYour job:\n1. Understand the problem from the prompt\n2. Explore codebase using read/glob/grep/bash\n3. Use web search and Context7 for documentation when needed\n4. Handle edge cases gracefully: retry tool failures, handle large files, parallel calls. Never crash on tool errors\n5. Return findings in structured markdown\n\nNOTE: this model runs at variant=max; on the free lane xhigh/max are the rungs that actually emit reasoning_content (lower rungs answer without visible reasoning).\n\nReturn your final answer as:\n\n```markdown\n## Research Results\n\n**Model:** 9router/oc/glm-5.3-flash-free\n\n### Analysis\n[Your analysis of the problem]\n\n### Solution\n[Your proposed solution with specific code/file references]\n\n### Reasoning\n[Why this approach works]\n```",
+    "variant": "max"
+  },
+  "9router-model-oc-deepseek-v4-1-flash-free": {
+    "description": "9router oc/deepseek-v4.1-flash-free equivalent subagent.",
+    "mode": "subagent",
+    "model": "9router/oc/deepseek-v4.1-flash-free",
+    "steps": 40,
+    "system": "Use the 9router model oc/deepseek-v4.1-flash-free for this task. Work independently, inspect the relevant context, and return a concise result with verification performed.",
+    "variant": "max"
+  },
+  "9router-model-oc-glm-5-3-flash-free": {
+    "description": "9router oc/glm-5.3-flash-free equivalent subagent.",
+    "mode": "subagent",
+    "model": "9router/oc/glm-5.3-flash-free",
+    "steps": 40,
+    "system": "Use the 9router model oc/glm-5.3-flash-free for this task. Work independently, inspect the relevant context, and return a concise result with verification performed.",
     "variant": "max"
   },
   "tokenharbor-glm-5.3-flash": {

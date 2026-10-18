@@ -62,6 +62,14 @@ const PATTERN_THINKING = [
   { provider: "codebuddy-cn", pattern: "deepseek-v4-pro",     levels: ["low", "high", "xhigh"] },
   { provider: "codebuddy-cn", pattern: "deepseek-v4.1-flash", levels: ["low", "high", "max"] },
   { pattern: "*deepseek-v4.*", levels: ["none", "low", "medium", "high", "xhigh", "max"] },
+  // OpenCode free lane (/inference/v1, probed live through relay pools):
+  // GLM 5.3 Flash accepts the whole ladder — xhigh/max are the rungs that emit
+  // reasoning_content. big-pickle only accepts OpenAI's four rungs
+  // (400: "reasoning_effort must be one of 'none', 'low', 'medium' or 'high'").
+  { provider: "opencode", pattern: "*glm-5.3-flash-free*", levels: ["none", "low", "medium", "high", "xhigh", "max"] },
+  { provider: "opencode-zen", pattern: "*glm-5.3-flash-free*", levels: ["none", "low", "medium", "high", "xhigh", "max"] },
+  { provider: "opencode", pattern: "*big-pickle*", levels: ["none", "low", "medium", "high"] },
+  { provider: "opencode-zen", pattern: "*big-pickle*", levels: ["none", "low", "medium", "high"] },
   // codebuddy-cn per-model effort sets — the server's product-config payload
   // publishes `reasoning.supportedEfforts` per model. NOTE: the chat endpoint
   // accepts any level you send (probed none/minimal/low/medium/high/xhigh/max

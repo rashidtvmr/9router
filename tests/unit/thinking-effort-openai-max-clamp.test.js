@@ -38,3 +38,40 @@ describe("applyThinking (openai): clamp max effort to xhigh", () => {
     expect(out.reasoning_effort).toBe("xhigh");
   });
 });
+
+// Free-lane regression (probed live through the relay pools): models whose
+// native set stops below xhigh must never receive "xhigh" — big-pickle answers
+// with 400 'reasoning_effort must be one of "none", "low", "medium" or "high"'
+// — and models that do accept max keep it.
+describe("applyThinking (openai): clamp to the model's own levels", () => {
+  it("big-pickle: \"max\" clamps down to \"high\" (no xhigh in its set)", () => {
+    const body = { reasoning_effort: "max" };
+    const out = applyThinking(FORMATS.OPENAI, "big-pickle", body, "opencode");
+    expect(out.reasoning_effort).toBe("high");
+  });
+
+  it("nemotron-3.5-super-vl-free: \"max\" clamps down to \"high\"", () => {
+    const body = { reasoning_effort: "max" };
+    const out = applyThinking(FORMATS.OPENAI, "nemotron-3.5-super-vl-free", body, "opencode");
+    expect(out.reasoning_effort).toBe("high");
+  });
+
+  it("glm-5.3-flash-free: \"max\" stays \"max\" (declared on the free lane)", () => {
+    const body = { reasoning_effort: "max" };
+    const out = applyThinking(FORMATS.OPENAI, "glm-5.3-flash-free", body, "opencode");
+    expect(out.reasoning_effort).toBe("max");
+  });
+
+  it("deepseek-v4.1-flash-free: \"max\" stays \"max\"", () => {
+    const body = { reasoning_effort: "max" };
+    const out = applyThinking(FORMATS.OPENAI, "deepseek-v4.1-flash-free", body, "opencode");
+    expect(out.reasoning_effort).toBe("max");
+  });
+
+  it("never clamps down to \"none\" (that would disable thinking)", () => {
+    const body = { reasoning_effort: "low" };
+    const out = applyThinking(FORMATS.OPENAI, "deepseek-v4-flash-free", body, "opencode");
+    // levels: ["none","high","max"] — "low" must rise to "high", not fall to "none".
+    expect(out.reasoning_effort).toBe("high");
+  });
+});

@@ -166,11 +166,25 @@ function toLevel(cfg) {
   return null;
 }
 
+const OPENAI_LEVEL_LADDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+// Clamp a requested effort onto the levels the model advertises. Unknown level
+// strings (auto/thinking/...) pass through untouched; a known rung the upstream
+// rejects drops to the nearest supported rung (downward first, then upward) so
+// the wire never carries an effort the model 400s on ("none" is never a clamp
+// target — it would silently disable thinking).
 function normalizeOpenAILevel(level, supportedLevels) {
-  if (level !== "max" && level !== "ultra") return level;
-  if (supportedLevels?.includes(level)) return level;
-  if (level === "ultra" && supportedLevels?.includes("max")) return "max";
-  return "xhigh";
+  if (!Array.isArray(supportedLevels) || supportedLevels.length === 0) return level;
+  if (supportedLevels.includes(level)) return level;
+  const index = OPENAI_LEVEL_LADDER.indexOf(level);
+  if (index === -1) return level;
+  for (let i = index - 1; i >= 0; i--) {
+    if (supportedLevels.includes(OPENAI_LEVEL_LADDER[i])) return OPENAI_LEVEL_LADDER[i];
+  }
+  for (let i = index + 1; i < OPENAI_LEVEL_LADDER.length; i++) {
+    if (supportedLevels.includes(OPENAI_LEVEL_LADDER[i])) return OPENAI_LEVEL_LADDER[i];
+  }
+  return level;
 }
 
 function toGeminiThinkingLevel(cfg) {

@@ -18,7 +18,16 @@ export async function GET() {
     opencodeZenRotation = openCodeZenRotationStats();
   } catch { /* keep health green */ }
 
-  return NextResponse.json({ ok: true, opencodeZenRotation }, { headers: CORS_HEADERS });
+  // Same counters for the anonymous (noauth) OpenCode free lane. A free-tier
+  // refusal on the primary egress triggers one replay through a different relay
+  // pool; these numbers say whether that ever recovers a request.
+  let opencodeFreeRotation = null;
+  try {
+    const { openCodeFreeRotationStats } = await import("open-sse/executors/opencode.js");
+    opencodeFreeRotation = openCodeFreeRotationStats();
+  } catch { /* keep health green */ }
+
+  return NextResponse.json({ ok: true, opencodeZenRotation, opencodeFreeRotation }, { headers: CORS_HEADERS });
 }
 
 export async function OPTIONS() {
