@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { DefaultExecutor } from "./default.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
-import { isMuseSparkModel, isOpenCodeFreeModel } from "../providers/models/helpers.js";
+import { isMuseSparkModel, isOpenCodeFreeModel, isOpencodeFreeTierModel } from "../providers/models/helpers.js";
 import { OPENCODE_ZEN_FREE_ROTATION } from "../config/opencodeFreeSession.js";
 import { isOpenCodeZenFreeTierError } from "../utils/opencodeFreeSessionError.js";
 import {
@@ -20,21 +20,15 @@ const MAX_TOOL_NAME_LEN = 128;
 const OPENCODE_UA = "opencode/1.18.31";
 const ZEN_ORIGIN = "https://opencode.ai";
 
-// Per-request carrier for a rotated upstream origin. Executor instances are
-// shared singletons (see executors/index.js), so rotation state has to ride on
-// the request's credentials — an instance field would leak across concurrent
-// requests.
-const ROTATED_ORIGIN = Symbol("opencodeZenRotatedOrigin");
-
-// Swaps only the origin so every Zen path (/zen/v1/chat/completions,
-// /zen/v1/messages, /zen/v1/responses) keeps working against a relay front.
-function withRotatedOrigin(url, origin) {
-  if (!origin) return url;
+// Deep-copy the pre-transform request body so a rotated retry replays the
+// original request instead of the mutated (already transformed) one —
+// BaseExecutor transforms bodies in place.
+function snapshotBody(body) {
+  if (!body || typeof body !== "object") return null;
   try {
-    const source = new URL(url);
-    return `${new URL(origin).origin}${source.pathname}${source.search}`;
+    return JSON.parse(JSON.stringify(body));
   } catch {
-    return url;
+    return null;
   }
 }
 
@@ -78,15 +72,20 @@ function unstableRandom() {
   return randomPart;
 }
 
+// Session prefix = 12 hex of ~(timeMs * 0x1000 + counter), low 48 bits, like the CLI.
+// Upstream decodes it and rejects a non-small counter with 403 FreeTierError
+// (live probes: counter 0–16 pass, >=100 fail), so the counter must stay real.
+const SESSION_PREFIX_MASK = (1n << 48n) - 1n;
+const SESSION_TIME_MASK = (1n << 36n) - 1n;
+
+function descendingTimeHex(time, counterValue) {
+  return (~(BigInt(time) * 0x1000n + BigInt(counterValue)) & SESSION_PREFIX_MASK)
+    .toString(16)
+    .padStart(12, "0");
+}
+
 export function generateSessionId(timestamp = Date.now()) {
-  const current = BigInt(timestamp) * 0x1000n + 1n;
-  const value = ~current;
-  const time = Array.from({ length: 6 }, (_, index) =>
-    Number((value >> BigInt(40 - 8 * index)) & 0xffn)
-      .toString(16)
-      .padStart(2, "0")
-  ).join("");
-  return `ses_${time}${unstableRandom()}`;
+  return `ses_${descendingTimeHex(timestamp, 1)}${unstableRandom()}`;
 }
 
 export function generateRequestId(timestamp = Date.now()) {
@@ -108,7 +107,9 @@ export function translateSessionId(sessionId, clientTool = "") {
     .createHash("sha256")
     .update(`opencode\0${clientTool || "generic"}\0${sessionId || ""}`)
     .digest();
-  const timeHex = digest.subarray(0, 6).toString("hex");
+  // Deterministic time field from the digest, counter pinned to 1 (what the CLI sends).
+  const time = BigInt(`0x${digest.subarray(0, 5).toString("hex")}`) & SESSION_TIME_MASK;
+  const timeHex = descendingTimeHex(time, 1);
   let randomPart = "";
   for (let i = 6; i < 20; i++) {
     randomPart += BASE62_CHARS[digest[i] % 62];
@@ -272,10 +273,9 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
     // Muse Spark lives on /responses even when a stale runtimeTransport leaks in.
-    const url = isResponsesModel(model)
+    return isResponsesModel(model)
       ? RESPONSES_BASE_URL
       : super.buildUrl(model, stream, urlIndex, credentials);
-    return withRotatedOrigin(url, credentials?.[ROTATED_ORIGIN]);
   }
 
   prepareRequestCredentials({ body, credentials, providerSessionId, clientTool } = {}) {
@@ -295,63 +295,69 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
   }
 
   async execute(args) {
+    const replayBody = snapshotBody(args.body);
     const credentials = this.prepareRequestCredentials(args);
     const result = await super.execute({ ...args, credentials });
 
     if (!OPENCODE_ZEN_FREE_ROTATION.enabled) return result;
     // Only the free tier is plausibly IP-quota'd. A paid model's 429 is a real
     // rate limit, and bouncing it through a relay just adds latency.
-    if (!isOpenCodeFreeModel(args.model)) return result;
+    if (!isOpenCodeFreeModel(args.model || args.body?.model)) return result;
     if (!result?.response || result.response.ok) return result;
     // Keyed lane: require free-tier wording in the body. A bare 429 here is
     // almost certainly a per-key rate limit, which no amount of IP rotation
     // fixes — see isOpenCodeZenFreeTierError.
     if (!(await isOpenCodeZenFreeTierError(result.response))) return result;
 
-    return this._retryOnRotatedOrigin(args, credentials, result);
+    return this._retryOnRotatedEgress(args, credentials, result, replayBody);
   }
 
   /**
-   * Replay a free-tier rejection against a different egress IP.
+   * Replay a free-tier rejection through a different egress IP.
    *
-   * Fail-open throughout: any problem resolving a relay pool, or a rotated
-   * origin that turns out to be the one we are already on, returns the
-   * original result untouched.
+   * Relay pools are fronted by the edge proxies in `proxyFetch` and addressed
+   * with `proxyOptions.vercelRelayUrl` (x-relay-target/x-relay-path), NOT by
+   * swapping the request origin — the relay answers a bare origin URL with
+   * 400 "missing target". Fail-open throughout: any problem resolving a pool,
+   * or a rotated pool equal to the one already in use, returns the original
+   * result untouched.
    */
-  async _retryOnRotatedOrigin(args, credentials, first) {
+  async _retryOnRotatedEgress(args, credentials, first, replayBody) {
     const { log } = args;
+    const maxAttempts = OPENCODE_ZEN_FREE_ROTATION.maxAttempts ?? 1;
+    if (maxAttempts <= 0) return first;
+
     let currentOrigin = ZEN_ORIGIN;
     try {
       currentOrigin = new URL(first.url).origin;
     } catch { /* keep the default */ }
+    const currentRelay = String(args.proxyOptions?.vercelRelayUrl || "").replace(/\/+$/, "");
+    const currentKey = (currentRelay || currentOrigin).replace(/\/+$/, "");
 
     let rotated;
     try {
-      rotated = await OPENCODE_ZEN_FREE_ROTATION.rotateUpstream(this.provider, currentOrigin);
+      rotated = await OPENCODE_ZEN_FREE_ROTATION.rotateUpstream(this.provider, currentKey);
     } catch (error) {
       log?.warn?.("ROTATE", `opencode-zen rotation skipped: ${error.message}`);
       return first;
     }
 
-    let rotatedOrigin;
-    try {
-      rotatedOrigin = rotated ? new URL(rotated).origin : "";
-    } catch {
-      rotatedOrigin = "";
-    }
-    if (!rotatedOrigin || rotatedOrigin === currentOrigin) {
+    const relay = typeof rotated === "string" ? rotated.replace(/\/+$/, "") : "";
+    if (!relay || relay === currentRelay || !/^https?:\/\//i.test(relay)) {
       log?.debug?.("ROTATE", `opencode-zen free-tier ${first.response.status} with no alternate relay available`);
       return first;
     }
 
     rotationStats.attempts += 1;
-    log?.debug?.("ROTATE", `opencode-zen free-tier ${first.response.status} on ${args.model}; retrying via ${rotatedOrigin}`);
+    log?.debug?.("ROTATE", `opencode-zen free-tier ${first.response.status} on ${args.model}; retrying via relay ${relay}`);
 
     let retried;
     try {
       retried = await super.execute({
         ...args,
-        credentials: { ...credentials, [ROTATED_ORIGIN]: rotatedOrigin },
+        body: replayBody ? JSON.parse(JSON.stringify(replayBody)) : args.body,
+        credentials,
+        proxyOptions: { ...(args.proxyOptions || {}), vercelRelayUrl: relay },
       });
     } catch (error) {
       // The replay is strictly best-effort — surface the original failure so a
@@ -363,7 +369,7 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
 
     if (retried?.response?.ok) {
       rotationStats.recovered += 1;
-      log?.debug?.("ROTATE", `opencode-zen rotation recovered ${args.model} via ${rotatedOrigin}`);
+      log?.debug?.("ROTATE", `opencode-zen rotation recovered ${args.model} via relay ${relay}`);
       return retried;
     }
 
@@ -381,14 +387,22 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
     // Free-tier gate: spoof the official client UA.
     headers["User-Agent"] = hasValidOpencodeVersion(downstreamUa) ? downstreamUa : OPENCODE_UA;
     headers["x-opencode-client"] = lower["x-opencode-client"] || "desktop";
+    headers["x-opencode-project"] = lower["x-opencode-project"] || "global";
     const prepared = credentials?.[SESSION_FIELD];
     if (prepared) {
       headers[SESSION_HEADER] = prepared;
-      return headers;
+    } else {
+      const fallback = this.prepareRequestCredentials({ credentials });
+      headers[SESSION_HEADER] = fallback[SESSION_FIELD];
     }
-
-    const fallback = this.prepareRequestCredentials({ credentials });
-    headers[SESSION_HEADER] = fallback[SESSION_FIELD];
+    if (isOpencodeFreeTierModel(model)) {
+      // Free-tier models are gated behind the attested free-tier identity even
+      // on the keyed lane: a real oc_sk_* key answers 403 FreeTierError, while
+      // `Bearer public` + session/request ids succeed. Paid models keep the
+      // connection key untouched.
+      headers["Authorization"] = "Bearer public";
+      headers["x-opencode-request"] = generateRequestId();
+    }
     return headers;
   }
 

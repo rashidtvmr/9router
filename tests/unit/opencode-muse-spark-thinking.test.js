@@ -17,56 +17,55 @@ const input = [{
 }];
 
 describe("OpenCode Free Muse Spark thinking", () => {
-  it("keeps x-opencode-session request-local when requests overlap", () => {
+  it("translates a conversation hint into a deterministic ses_ session", () => {
     const executor = new OpenCodeExecutor();
-    const first = executor.prepareRequestCredentials({
-      body: { messages: [{ role: "user", content: "first" }] },
+    const prepare = (tool, providerSessionId) => executor.prepareRequestCredentials({
+      body: { messages: [{ role: "user", content: tool }] },
       credentials: { connectionId: "connection-a", rawHeaders: {} },
-      providerSessionId: "conversation-first",
+      providerSessionId,
     });
-    const second = executor.prepareRequestCredentials({
-      body: { messages: [{ role: "user", content: "second" }] },
-      credentials: { connectionId: "connection-b", rawHeaders: {} },
-      providerSessionId: "conversation-second",
-    });
+    const first = executor.buildHeaders(prepare("first", "conversation-first"), true);
+    const second = executor.buildHeaders(prepare("second", "conversation-second"), true);
+    // Same conversation → same translated session (deterministic digest).
+    const firstAgain = executor.buildHeaders(prepare("first", "conversation-first"), true);
 
-    const firstHeaders = executor.buildHeaders(first, true);
-    const secondHeaders = executor.buildHeaders(second, true);
-
-    expect(firstHeaders["x-opencode-session"]).toBe("conversation-first");
-    expect(secondHeaders["x-opencode-session"]).toBe("conversation-second");
-    expect(firstHeaders["x-session-id"]).toBe("conversation-first");
-    expect(firstHeaders["x-session-affinity"]).toBe("conversation-first");
-    expect(secondHeaders["x-session-id"]).toBe("conversation-second");
-    expect(secondHeaders["x-session-affinity"]).toBe("conversation-second");
+    expect(first["x-opencode-session"]).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+    expect(first["x-opencode-session"]).not.toBe(second["x-opencode-session"]);
+    expect(firstAgain["x-opencode-session"]).toBe(first["x-opencode-session"]);
+    expect(first["x-session-id"]).toBe(first["x-opencode-session"]);
+    expect(first["x-session-affinity"]).toBe(first["x-opencode-session"]);
+    expect(second["x-session-id"]).toBe(second["x-opencode-session"]);
+    expect(second["x-session-affinity"]).toBe(second["x-opencode-session"]);
   });
 
-  it("preserves a valid downstream session header", () => {
+  it("preserves a native ses_ session header verbatim", () => {
     const executor = new OpenCodeExecutor();
+    const native = "ses_0123456789abABCDEFGHIJKLMN";
     const credentials = executor.prepareRequestCredentials({
       body: { messages: [{ role: "user", content: "hello" }] },
       credentials: {
         connectionId: "connection-a",
-        rawHeaders: { "X-OpenCode-Session": " native-session " },
+        rawHeaders: { "X-OpenCode-Session": ` ${native} ` },
       },
       providerSessionId: "translated-session",
     });
 
-    expect(executor.buildHeaders(credentials, true)["x-opencode-session"]).toBe("native-session");
-    expect(executor.buildHeaders(credentials, true)["x-session-id"]).toBe("native-session");
-    expect(executor.buildHeaders(credentials, true)["x-session-affinity"]).toBe("native-session");
+    expect(executor.buildHeaders(credentials, true)["x-opencode-session"]).toBe(native);
+    expect(executor.buildHeaders(credentials, true)["x-session-id"]).toBe(native);
+    expect(executor.buildHeaders(credentials, true)["x-session-affinity"]).toBe(native);
   });
 
-  it("uses a versioned OpenCode user agent for free-tier compatibility", () => {
+  it("uses the v2 OpenCode user agent for free-tier compatibility", () => {
     const executor = new OpenCodeExecutor();
+    const V2_UA = "opencode/latest/2.0.26/cli";
 
-    expect(executor.buildHeaders({ rawHeaders: {} }, true)["User-Agent"]).toBe("opencode/1.18.26");
-    expect(executor.buildHeaders({ rawHeaders: { "user-agent": "opencode/1.16.9" } }, true)["User-Agent"])
-      .toBe("opencode/1.18.26");
-    expect(executor.buildHeaders({ rawHeaders: { "user-agent": "opencode/1.17.0" } }, true)["User-Agent"])
-      .toBe("opencode/1.17.0");
+    expect(executor.buildHeaders({ rawHeaders: {} }, true)["User-Agent"]).toBe(V2_UA);
+    // v1 UAs are rejected upstream with 403 FreeTierError → spoof the v2 client.
     expect(executor.buildHeaders({ rawHeaders: { "user-agent": "opencode/1.18.26" } }, true)["User-Agent"])
-      .toBe("opencode/1.18.26");
+      .toBe(V2_UA);
+    // A genuine v2 downstream UA is preserved.
+    expect(executor.buildHeaders({ rawHeaders: { "user-agent": V2_UA } }, true)["User-Agent"])
+      .toBe(V2_UA);
   });
 
   it("advertises reasoning and the requested model limits", () => {
@@ -125,7 +124,7 @@ describe("OpenCode Free Muse Spark thinking", () => {
 
     expect(getModelTargetFormat("oc", "union-alpha")).toBe(FORMATS.CLAUDE);
     const url = executor.buildUrl("union-alpha");
-    expect(url).toBe("https://opencode.ai/zen/v1/messages");
+    expect(url).toBe("https://opencode.ai/inference/v1/messages");
     expect(executor.buildHeaders({}, true, url)).toMatchObject({
       "anthropic-version": "2023-06-01",
     });
@@ -152,7 +151,7 @@ describe("OpenCode Free Muse Spark thinking", () => {
     const executor = new OpenCodeExecutor();
     const body = { messages: [{ role: "user", content: "hi" }], max_tokens: 1024 };
     executor.transformRequest("big-pickle", body, true, {});
-    expect(executor.buildUrl("big-pickle")).toBe("https://opencode.ai/zen/v1/chat/completions");
+    expect(executor.buildUrl("big-pickle")).toBe("https://opencode.ai/inference/v1/chat/completions");
     expect(body.max_tokens).toBe(1024);
     expect(body.max_output_tokens).toBeUndefined();
   });
@@ -188,8 +187,8 @@ describe("OpenCode Free Muse Spark thinking", () => {
     const futureModel = "muse-spark-1.4-contributor-free";
 
     for (const m of ["muse-spark-1.3-contributor-free", futureModel]) {
-      expect(executor.buildUrl(m)).toBe("https://opencode.ai/zen/v1/responses");
-      expect(executor.buildUrl(`${m}(high)`)).toBe("https://opencode.ai/zen/v1/responses");
+      expect(executor.buildUrl(m)).toBe("https://opencode.ai/inference/v1/responses");
+      expect(executor.buildUrl(`${m}(high)`)).toBe("https://opencode.ai/inference/v1/responses");
       expect(getModelTargetFormat("oc", m)).toBe("openai-responses");
 
       const body = {
@@ -266,14 +265,18 @@ describe("OpenCode Free Muse Spark thinking", () => {
     // User message, function_call, function_call_output, and next user message survive
     const types = out.input.map((item) => item.type);
     expect(types).toEqual(["message", "function_call", "function_call_output", "message"]);
-    // Tools flattened and empty properties added
-    expect(out.tools).toEqual([
+    // Tools flattened and empty properties added. The caller's own `shell` clashes
+    // with OpenCode's fingerprint tool, so it (and its prior call) travel under an
+    // alias while the exact read/shell definitions are appended.
+    expect(out.tools.slice(0, 1)).toEqual([
       {
         type: "function",
-        name: "shell",
+        name: "shell_client",
         description: "Run shell command",
         parameters: { type: "object", properties: {} },
       },
     ]);
+    expect(out.tools.map((t) => t.name)).toEqual(["shell_client", "read", "shell"]);
+    expect(out.input.find((item) => item.type === "function_call").name).toBe("shell_client");
   });
 });
