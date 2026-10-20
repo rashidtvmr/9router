@@ -1,10 +1,12 @@
 // Applies the 9router agent/effort fleet to an opencode config on any machine.
 //
 // What it does (additive and idempotent — safe to re-run):
-//   1. Merges reasoning-effort variants into model entries (adds missing keys
+//   1. Creates missing model entries declared in NEW_MODELS (base entry only,
+//      never overwrites an existing model).
+//   2. Merges reasoning-effort variants into model entries (adds missing keys
 //      only, never overwrites what is already there).
-//   2. Pins `variant` on agents that exist in the target file (skips the rest).
-//   3. Creates the fleet agents that do not exist yet.
+//   3. Pins `variant` on agents that exist in the target file (skips the rest).
+//   4. Creates the fleet agents that do not exist yet.
 //
 // What it does NOT do: remove anything, touch the global model, or reformat
 // unrelated settings.
@@ -343,6 +345,153 @@ const MODEL_VARIANTS = {
         "reasoningEffort": "max"
       }
     }
+  },
+  // Probed raw on the free lane (2026-10-20): beam-free rejects "none" and
+  // "minimal" (400), so its ladder starts at low.
+  "9router||oc/beam-free": {
+    "low": {
+      "options": {
+        "reasoningEffort": "low"
+      }
+    },
+    "medium": {
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    "high": {
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "xhigh": {
+      "options": {
+        "reasoningEffort": "xhigh"
+      }
+    },
+    "max": {
+      "options": {
+        "reasoningEffort": "max"
+      }
+    }
+  },
+  "9router||oc/nemotron-3.5-super-vl-free": {
+    "minimal": {
+      "options": {
+        "reasoningEffort": "minimal"
+      }
+    },
+    "low": {
+      "options": {
+        "reasoningEffort": "low"
+      }
+    },
+    "medium": {
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    "high": {
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "xhigh": {
+      "options": {
+        "reasoningEffort": "xhigh"
+      }
+    },
+    "max": {
+      "options": {
+        "reasoningEffort": "max"
+      }
+    }
+  },
+  "9router||oc/nemotron-3.5-lightning-free": {
+    "minimal": {
+      "options": {
+        "reasoningEffort": "minimal"
+      }
+    },
+    "low": {
+      "options": {
+        "reasoningEffort": "low"
+      }
+    },
+    "medium": {
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    "high": {
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "xhigh": {
+      "options": {
+        "reasoningEffort": "xhigh"
+      }
+    },
+    "max": {
+      "options": {
+        "reasoningEffort": "max"
+      }
+    }
+  },
+  "9router||oc/longcat-2.5-preview-free": {
+    "minimal": {
+      "options": {
+        "reasoningEffort": "minimal"
+      }
+    },
+    "low": {
+      "options": {
+        "reasoningEffort": "low"
+      }
+    },
+    "medium": {
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    "high": {
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "xhigh": {
+      "options": {
+        "reasoningEffort": "xhigh"
+      }
+    },
+    "max": {
+      "options": {
+        "reasoningEffort": "max"
+      }
+    }
+  }
+};
+
+// Base entries for models the target config does not know yet. Created before
+// the variant pass so a fresh machine converges in one run; existing entries
+// are never overwritten.
+const NEW_MODELS = {
+  "9router||oc/beam-free": {
+    "name": "oc/beam-free",
+    "modalities": { "input": ["text"], "output": ["text"] }
+  },
+  "9router||oc/nemotron-3.5-super-vl-free": {
+    "name": "oc/nemotron-3.5-super-vl-free",
+    "modalities": { "input": ["text", "image"], "output": ["text"] }
+  },
+  "9router||oc/nemotron-3.5-lightning-free": {
+    "name": "oc/nemotron-3.5-lightning-free",
+    "modalities": { "input": ["text"], "output": ["text"] }
+  },
+  "9router||oc/longcat-2.5-preview-free": {
+    "name": "oc/longcat-2.5-preview-free",
+    "modalities": { "input": ["text", "image"], "output": ["text"] }
   }
 };
 
@@ -477,8 +626,21 @@ if (!existsSync(FILE)) {
 }
 const cfg = JSON.parse(readFileSync(FILE, "utf8"));
 const log = [];
-let declared = 0, pinned = 0, created = 0;
+let declared = 0, pinned = 0, created = 0, modelsAdded = 0;
 const skipped = [];
+
+// 0. New model entries (both provider maps; only where the provider exists).
+for (const [key, entry] of Object.entries(NEW_MODELS)) {
+  const [p, id] = key.split("||");
+  for (const sec of ["provider", "providers"]) {
+    if (!cfg[sec]?.[p]) continue;
+    if (!cfg[sec][p].models) cfg[sec][p].models = {};
+    if (!cfg[sec][p].models[id]) {
+      cfg[sec][p].models[id] = structuredClone(entry);
+      modelsAdded += 1;
+    }
+  }
+}
 
 // 1. Model variants (both provider maps; whichever sections exist on target).
 for (const [key, variants] of Object.entries(MODEL_VARIANTS)) {
@@ -544,6 +706,7 @@ for (const [name, def] of Object.entries(NEW_AGENTS)) {
   created += 1;
 }
 
+log.push("models added: " + modelsAdded);
 log.push("variants added: " + declared);
 log.push("agents pinned: " + pinned);
 log.push("agents created: " + created);

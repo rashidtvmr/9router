@@ -50,10 +50,28 @@ describe("applyThinking (openai): clamp to the model's own levels", () => {
     expect(out.reasoning_effort).toBe("high");
   });
 
-  it("nemotron-3.5-super-vl-free: \"max\" clamps down to \"high\"", () => {
+  it.each(["nemotron-3.5-super-vl-free", "nemotron-3.5-lightning-free"])("%s: \"max\" stays \"max\" (full ladder)", (id) => {
     const body = { reasoning_effort: "max" };
-    const out = applyThinking(FORMATS.OPENAI, "nemotron-3.5-super-vl-free", body, "opencode");
-    expect(out.reasoning_effort).toBe("high");
+    const out = applyThinking(FORMATS.OPENAI, id, body, "opencode");
+    expect(out.reasoning_effort).toBe("max");
+  });
+
+  it("beam-free: \"max\" stays \"max\"", () => {
+    const body = { reasoning_effort: "max" };
+    const out = applyThinking(FORMATS.OPENAI, "beam-free", body, "opencode");
+    expect(out.reasoning_effort).toBe("max");
+  });
+
+  it("beam-free: \"minimal\" rises to \"low\" (upstream 400s on minimal)", () => {
+    const body = { reasoning_effort: "minimal" };
+    const out = applyThinking(FORMATS.OPENAI, "beam-free", body, "opencode");
+    expect(out.reasoning_effort).toBe("low");
+  });
+
+  it("longcat-2.5-preview-free: \"max\" stays \"max\"", () => {
+    const body = { reasoning_effort: "max" };
+    const out = applyThinking(FORMATS.OPENAI, "longcat-2.5-preview-free", body, "opencode");
+    expect(out.reasoning_effort).toBe("max");
   });
 
   it("glm-5.3-flash-free: \"max\" stays \"max\" (declared on the free lane)", () => {

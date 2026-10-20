@@ -70,6 +70,16 @@ const PATTERN_THINKING = [
   { provider: "opencode-zen", pattern: "*glm-5.3-flash-free*", levels: ["none", "low", "medium", "high", "xhigh", "max"] },
   { provider: "opencode", pattern: "*big-pickle*", levels: ["none", "low", "medium", "high"] },
   { provider: "opencode-zen", pattern: "*big-pickle*", levels: ["none", "low", "medium", "high"] },
+  // Probed raw on the free lane (2026-10-20): beam-free 400s on "none" and
+  // "minimal" but takes the rest through max; Nemotron 3.5 (Super VL and
+  // Lightning) takes every rung; LongCat 2.5 takes minimal→max but "none" does
+  // not actually disable its thinking, so it is not offered.
+  { provider: "opencode", pattern: "*beam-free*", levels: ["low", "medium", "high", "xhigh", "max"] },
+  { provider: "opencode-zen", pattern: "*beam-free*", levels: ["low", "medium", "high", "xhigh", "max"] },
+  { provider: "opencode", pattern: "*nemotron-3.5-*-free*", levels: ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+  { provider: "opencode-zen", pattern: "*nemotron-3.5-*-free*", levels: ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+  { provider: "opencode", pattern: "*longcat-2.5-preview-free*", levels: ["minimal", "low", "medium", "high", "xhigh", "max"] },
+  { provider: "opencode-zen", pattern: "*longcat-2.5-preview-free*", levels: ["minimal", "low", "medium", "high", "xhigh", "max"] },
   // codebuddy-cn per-model effort sets — the server's product-config payload
   // publishes `reasoning.supportedEfforts` per model. NOTE: the chat endpoint
   // accepts any level you send (probed none/minimal/low/medium/high/xhigh/max
