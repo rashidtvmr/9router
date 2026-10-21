@@ -43,6 +43,59 @@ describe("relay pool seed migration (002)", () => {
     const after = db.get(`SELECT isActive FROM proxyPools WHERE id = ?`, [row.id]);
     expect(after.isActive).toBe(0);
   });
+
+  it("keeps the AWS Lambda inventory complete and in sync with deploy-relay.sh", () => {
+    const aws1 = DEFAULT_RELAY_POOLS.filter((p) => p.name.startsWith("aws-relay-"));
+    const aws2 = DEFAULT_RELAY_POOLS.filter((p) => p.name.startsWith("aws2-relay-"));
+    const urls = [...aws1, ...aws2].map((p) => p.proxyUrl);
+
+    expect(aws1).toHaveLength(17);
+    expect(aws2).toHaveLength(17);
+    expect(new Set(urls).size).toBe(34);
+    for (const url of urls) {
+      expect(url, `unexpected relay URL: ${url}`).toMatch(
+        /^https:\/\/[a-z0-9]+\.lambda-url\.[a-z0-9-]+\.on\.aws\/$/
+      );
+    }
+
+    const script = fs.readFileSync(
+      new URL("../../src/api-deploy/aws-lambda-relay/deploy-relay.sh", import.meta.url),
+      "utf8"
+    );
+    const parseMap = (name) => {
+      const marker = `REGIONS_${name}=(`;
+      const start = script.indexOf(marker);
+      expect(start, `missing ${marker} in deploy-relay.sh`).toBeGreaterThan(-1);
+      const end = script.indexOf("\n)", start);
+      expect(end, `unterminated ${marker} in deploy-relay.sh`).toBeGreaterThan(start);
+      return Object.fromEntries(
+        [...script.slice(start, end).matchAll(/"([^"|]+)\|([^"]+)"/g)].map((m) => [m[1], m[2]])
+      );
+    };
+
+    const scriptAcct1 = parseMap("ACCT1");
+    const scriptAcct2 = parseMap("ACCT2");
+    expect(Object.keys(scriptAcct1)).toHaveLength(17);
+    expect(Object.keys(scriptAcct2)).toHaveLength(17);
+    expect(Object.keys(scriptAcct1).sort()).toEqual(Object.keys(scriptAcct2).sort());
+
+    for (const pool of aws1) {
+      const region = pool.name.slice("aws-relay-".length);
+      expect(scriptAcct1[region], `account 1 ${region} URL`).toBe(pool.proxyUrl);
+    }
+    for (const pool of aws2) {
+      const region = pool.name.slice("aws2-relay-".length);
+      expect(scriptAcct2[region], `account 2 ${region} URL`).toBe(pool.proxyUrl);
+    }
+
+    const docs = fs.readFileSync(
+      new URL("../../src/api-deploy/aws-lambda-relay/DEPLOY.md", import.meta.url),
+      "utf8"
+    );
+    for (const pool of [...aws1, ...aws2]) {
+      expect(docs, `DEPLOY.md is missing ${pool.name}`).toContain(pool.proxyUrl);
+    }
+  });
 });
 
 afterEach(() => {

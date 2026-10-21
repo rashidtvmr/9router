@@ -1,11 +1,25 @@
 // Default relay proxy pools, seeded into a fresh DB on first boot.
-// Source of truth lives here — edit this file to add/update relay URLs, no
-// separate script run needed. Seeding is idempotent (INSERT OR REPLACE by
-// stable id) and never touches user-modified pools (matched by proxyUrl).
-// Row shape matches proxyPoolsRepo.createProxyPool: name, proxyUrl, type.
-// NOTE: type "cloudflare" is the relay discriminator used by
+//
+// Inventory: 1 Cloudflare Worker + 34 AWS Lambda Function URLs.
+// - Account 1 (135775792878): 17 regions, pools named `aws-relay-<region>`.
+// - Account 2 (042467473346): 17 regions, pools named `aws2-relay-<region>`.
+// Both accounts are live in the same 17 regions. The URLs are distinct even
+// within a region, so rotation across all 34 AWS relays yields 34 egress IPs.
+// ap-south-2 is intentionally absent (CreateFunctionUrlConfig fails there).
+//
+// Relay contract: type "cloudflare" is the relay discriminator used by
 // OPENCODE_FREE_SESSION_ROTATION (vercel/cloudflare/deno); these AWS
-// lambda-url relays are fronted by edge workers, so they carry "cloudflare".
+// Function URLs use the same x-relay-target / x-relay-path headers as the
+// Cloudflare/Vercel workers, so they also carry "cloudflare".
+//
+// This file is the canonical seed inventory. Keep
+// src/api-deploy/aws-lambda-relay/deploy-relay.sh and its DEPLOY.md inventory
+// in sync; tests/unit/relay-pool-seed.test.js checks the 17 + 17 parity.
+//
+// Migration 002 inserts only pools whose proxyUrl is not already present. It is
+// idempotent, never touches user-modified rows, and does not update an existing
+// URL in place. To replace a URL, add the new pool and delete the old one.
+// Row shape matches proxyPoolsRepo.createProxyPool: name, proxyUrl, type.
 
 export const DEFAULT_RELAY_POOLS = [
   {
