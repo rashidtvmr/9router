@@ -43,19 +43,40 @@ const RESPONSES_MODELS = new Set([
 const MESSAGES_MODELS = new Set(["union-alpha"]);
 
 // Process-lifetime probe counters for the anonymous-lane rotation experiment.
-// The free tier is IP-keyed, so a rejected request is replayed through a
-// different relay pool; these counters answer "did that recover anything?".
-// Reset on restart — telemetry, not accounting.
-const rotationStats = { attempts: 0, recovered: 0, exhausted: 0 };
+// The free tier can reject by session and by egress IP, so a rejected request
+// is replayed once from the caller's own egress, then through different relay
+// pools; these counters answer "did that recover anything?". Reset on restart —
+// telemetry, not accounting.
+const rotationStats = {
+  attempts: 0,
+  recovered: 0,
+  exhausted: 0,
+  directAttempts: 0,
+  directRecovered: 0,
+  directExhausted: 0,
+};
 
 export function openCodeFreeRotationStats() {
-  const { attempts, recovered, exhausted } = rotationStats;
+  const {
+    attempts,
+    recovered,
+    exhausted,
+    directAttempts,
+    directRecovered,
+    directExhausted,
+  } = rotationStats;
   return {
     attempts,
     recovered,
     exhausted,
     // null while there is nothing to judge, so callers never read 0% as "broken".
     recoveryRate: attempts === 0 ? null : recovered / attempts,
+    // The caller's own egress is a separate quota bucket from the relay pools.
+    // Keep its hit-rate visible instead of folding it into relay rotation.
+    directAttempts,
+    directRecovered,
+    directExhausted,
+    directRecoveryRate: directAttempts === 0 ? null : directRecovered / directAttempts,
   };
 }
 
@@ -444,18 +465,18 @@ export class OpenCodeExecutor extends BaseExecutor {
   }
 
   /**
-   * Replay a free-tier rejection through a different egress IP.
+   * Replay a free-tier rejection from a different egress.
    *
-   * Relay pools are fronted by the edge proxies in `proxyFetch` and addressed
-   * with `proxyOptions.vercelRelayUrl` (x-relay-target/x-relay-path), NOT by
+   * The caller's own egress is tried first: relay pools can share an exhausted
+   * datacenter quota, while the local route may still have capacity. Relay
+   * pools are fronted by the edge proxies in `proxyFetch` and addressed with
+   * `proxyOptions.vercelRelayUrl` (x-relay-target/x-relay-path), NOT by
    * swapping the request origin — the relay answers a bare origin URL with
    * 400 "missing target". Fail-open: any problem resolving a pool returns the
    * original response untouched.
    */
   async _retryOnRotatedEgress(args, credentials, first, replayBody, freshSession = null) {
     const { log } = args;
-    const maxAttempts = OPENCODE_SESSION_RETRY?.maxAttempts ?? 1;
-    if (maxAttempts <= 0) return first;
 
     const stripSlash = (value) => String(value || "").replace(/\/+$/, "");
     const currentRelay = stripSlash(args.proxyOptions?.vercelRelayUrl);
@@ -463,6 +484,59 @@ export class OpenCodeExecutor extends BaseExecutor {
     const firstStatus = first?.response?.status ?? "unknown";
     const triedRelays = new Set(currentRelay ? [currentRelay] : []);
     let attemptsThisRequest = 0;
+    let directAttempted = false;
+
+    // The relay pools share a datacenter quota bucket. The caller's own egress
+    // is a separate bucket and is often the only route that still has free-tier
+    // capacity. Try it once, before spending the relay retry budget. Only do
+    // this when the primary request actually went through a relay: otherwise
+    // the primary already was direct and repeating it would just burn quota.
+    if (currentRelay) {
+      directAttempted = true;
+      rotationStats.directAttempts += 1;
+      const directSession = freshSession || replaceStableSession(credentials);
+      log?.info?.("ROTATE", `opencode free-tier ${firstStatus} on ${args.model}; trying direct egress`);
+
+      try {
+        const direct = await super.execute({
+          ...args,
+          body: replayBody ? JSON.parse(JSON.stringify(replayBody)) : args.body,
+          credentials: { ...credentials, [SESSION_FIELD]: directSession },
+          proxyOptions: {
+            ...(args.proxyOptions || {}),
+            vercelRelayUrl: "",
+            connectionProxyEnabled: false,
+            connectionProxyUrl: "",
+            connectionNoProxy: "",
+            proxyPoolId: null,
+            strictProxy: false,
+            // Bypass relay, connection-proxy and environment-proxy routing.
+            forceDirect: true,
+          },
+        });
+
+        if (direct?.response?.ok) {
+          rotationStats.directRecovered += 1;
+          log?.info?.("ROTATE", `opencode rotation recovered ${args.model} via direct egress`);
+          return direct;
+        }
+
+        // A genuine 4xx/5xx from direct egress is more useful than the relay's
+        // quota 429. Surface it instead of masking it with more retries.
+        if (direct?.response && !(await isOpenCodeFreeError(direct.response))) {
+          return direct;
+        }
+
+        rotationStats.directExhausted += 1;
+        log?.warn?.("ROTATE", `opencode direct egress did not recover ${args.model} (${direct?.response?.status ?? "no response"})`);
+      } catch (error) {
+        rotationStats.directExhausted += 1;
+        log?.warn?.("ROTATE", `opencode direct egress failed (${error.message})`);
+      }
+    }
+
+    const maxAttempts = OPENCODE_SESSION_RETRY?.maxAttempts ?? 1;
+    if (maxAttempts <= 0) return first;
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       let rotated;
@@ -485,10 +559,11 @@ export class OpenCodeExecutor extends BaseExecutor {
 
       // A free-tier rejection means the cached session is a spent quota
       // bucket. Mint a new one for each replay and make it the cached session
-      // so later requests do not walk back into the same 429.
+      // so later requests do not walk back into the same 429. After a direct
+      // attempt the direct session is spent too, so every relay gets a fresh one.
       const session = replaceStableSession(
         credentials,
-        attempt === 0 && freshSession ? freshSession : generateSessionId()
+        attempt === 0 && !directAttempted && freshSession ? freshSession : generateSessionId()
       );
       log?.info?.("ROTATE", `opencode free-tier ${firstStatus} on ${args.model}; retry ${attemptsThisRequest}/${maxAttempts} via relay ${relay}`);
 

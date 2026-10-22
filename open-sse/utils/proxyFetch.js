@@ -332,6 +332,13 @@ async function createBypassRequest(parsedUrl, realIP, options) {
 export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   const targetUrl = typeof url === "string" ? url : url.toString();
 
+  // Forced-direct rescue path: bypass relay, connection proxy and environment
+  // proxy routing. Used only when a relayed free-tier request is refused and
+  // the caller's own egress may still have quota.
+  if (proxyOptions?.forceDirect === true) {
+    return originalFetch(url, options);
+  }
+
   // Vercel relay: forward request via relay headers
   const vercelRelayUrl = normalizeString(proxyOptions?.vercelRelayUrl);
   if (vercelRelayUrl) {
