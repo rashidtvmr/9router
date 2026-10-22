@@ -70,7 +70,10 @@ export const OPENCODE_FREE_SESSION_ROTATION = {
 
 // Compatibility aliases for callers introduced during the initial rollout.
 export const OPENCODE_NATIVE_SESSION_CACHE = OPENCODE_FREE_SESSION_ROTATION;
-export const OPENCODE_SESSION_RETRY = { maxAttempts: 1, delayMs: 0 };
+// A single replay can land on a relay whose egress IP is also spent. Try a
+// few distinct relays (each with a fresh upstream session) before surfacing
+// the original 429, otherwise one unlucky relay keeps the whole lane down.
+export const OPENCODE_SESSION_RETRY = { maxAttempts: 3, delayMs: 0 };
 
 /**
  * Free-tier IP rotation for the keyed Zen lane (opencode-zen).

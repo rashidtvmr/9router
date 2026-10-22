@@ -158,6 +158,15 @@ function identityKey(credentials) {
   return "opencode:default";
 }
 
+function rememberStableSession(key, sessionId) {
+  stableOpencodeSessions.delete(key);
+  stableOpencodeSessions.set(key, { sessionId, lastUsed: Date.now() });
+  while (stableOpencodeSessions.size > MAX_STABLE_SESSIONS) {
+    stableOpencodeSessions.delete(stableOpencodeSessions.keys().next().value);
+  }
+  return sessionId;
+}
+
 export function stableSessionId(credentials) {
   const key = identityKey(credentials);
   const existing = stableOpencodeSessions.get(key);
@@ -167,12 +176,15 @@ export function stableSessionId(credentials) {
     stableOpencodeSessions.set(key, existing);
     return existing.sessionId;
   }
-  const sessionId = generateSessionId();
-  if (stableOpencodeSessions.size >= MAX_STABLE_SESSIONS) {
-    stableOpencodeSessions.delete(stableOpencodeSessions.keys().next().value);
-  }
-  stableOpencodeSessions.set(key, { sessionId, lastUsed: Date.now() });
-  return sessionId;
+  return rememberStableSession(key, generateSessionId());
+}
+
+// Replace the cached session for a downstream identity. Called when the
+// upstream says the free-tier quota is spent: the old session is a dead quota
+// bucket, and reusing it would make every later request pay a 429 before the
+// executor even reaches the relay-rotation path.
+export function replaceStableSession(credentials, sessionId = generateSessionId()) {
+  return rememberStableSession(identityKey(credentials), sessionId);
 }
 
 function bodyHasSessionHints(body) {
@@ -427,7 +439,8 @@ export class OpenCodeExecutor extends BaseExecutor {
     if (!result?.response || result.response.ok) return result;
     if (!(await isOpenCodeFreeError(result.response))) return result;
 
-    return this._retryOnRotatedEgress(args, credentials, result, replayBody);
+    const freshSession = replaceStableSession(credentials);
+    return this._retryOnRotatedEgress(args, credentials, result, replayBody, freshSession);
   }
 
   /**
@@ -439,60 +452,73 @@ export class OpenCodeExecutor extends BaseExecutor {
    * 400 "missing target". Fail-open: any problem resolving a pool returns the
    * original response untouched.
    */
-  async _retryOnRotatedEgress(args, credentials, first, replayBody) {
+  async _retryOnRotatedEgress(args, credentials, first, replayBody, freshSession = null) {
     const { log } = args;
     const maxAttempts = OPENCODE_SESSION_RETRY?.maxAttempts ?? 1;
     if (maxAttempts <= 0) return first;
 
-    const currentRelay = String(args.proxyOptions?.vercelRelayUrl || "").replace(/\/+$/, "");
-    const currentKey = (currentRelay || this.config?.baseUrl || "").replace(/\/+$/, "");
+    const stripSlash = (value) => String(value || "").replace(/\/+$/, "");
+    const currentRelay = stripSlash(args.proxyOptions?.vercelRelayUrl);
+    let rotationKey = currentRelay || stripSlash(this.config?.baseUrl);
+    const firstStatus = first?.response?.status ?? "unknown";
+    const triedRelays = new Set(currentRelay ? [currentRelay] : []);
+    let attemptsThisRequest = 0;
 
-    let rotated;
-    try {
-      rotated = await OPENCODE_FREE_SESSION_ROTATION.rotateUpstream(this.provider, currentKey);
-    } catch (error) {
-      log?.warn?.("ROTATE", `opencode rotation skipped: ${error.message}`);
-      return first;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      let rotated;
+      try {
+        rotated = await OPENCODE_FREE_SESSION_ROTATION.rotateUpstream(this.provider, rotationKey);
+      } catch (error) {
+        log?.warn?.("ROTATE", `opencode rotation skipped: ${error.message}`);
+        break;
+      }
+
+      const relay = stripSlash(rotated);
+      if (!relay || !/^https?:\/\//i.test(relay) || triedRelays.has(relay)) {
+        log?.debug?.("ROTATE", `opencode free-tier ${firstStatus} with no alternate relay available`);
+        break;
+      }
+
+      triedRelays.add(relay);
+      attemptsThisRequest += 1;
+      rotationStats.attempts += 1;
+
+      // A free-tier rejection means the cached session is a spent quota
+      // bucket. Mint a new one for each replay and make it the cached session
+      // so later requests do not walk back into the same 429.
+      const session = replaceStableSession(
+        credentials,
+        attempt === 0 && freshSession ? freshSession : generateSessionId()
+      );
+      log?.info?.("ROTATE", `opencode free-tier ${firstStatus} on ${args.model}; retry ${attemptsThisRequest}/${maxAttempts} via relay ${relay}`);
+
+      try {
+        const retried = await super.execute({
+          ...args,
+          body: replayBody ? JSON.parse(JSON.stringify(replayBody)) : args.body,
+          credentials: { ...credentials, [SESSION_FIELD]: session },
+          proxyOptions: { ...(args.proxyOptions || {}), vercelRelayUrl: relay },
+        });
+        if (retried?.response?.ok) {
+          rotationStats.recovered += 1;
+          log?.info?.("ROTATE", `opencode rotation recovered ${args.model} via relay ${relay}`);
+          return retried;
+        }
+        rotationStats.exhausted += 1;
+        log?.warn?.("ROTATE", `opencode rotation ${attemptsThisRequest}/${maxAttempts} did not recover ${args.model} (${retried?.response?.status ?? "no response"})`);
+      } catch (error) {
+        // The replay is strictly best-effort — surface the original failure so a
+        // relay problem never masks the real upstream error.
+        rotationStats.exhausted += 1;
+        log?.warn?.("ROTATE", `opencode rotated retry ${attemptsThisRequest}/${maxAttempts} failed (${error.message})`);
+      }
+
+      rotationKey = relay;
     }
 
-    const relay = typeof rotated === "string" ? rotated.replace(/\/+$/, "") : "";
-    if (!relay || relay === currentRelay || !/^https?:\/\//i.test(relay)) {
-      log?.debug?.("ROTATE", `opencode free-tier ${first.response.status} with no alternate relay available`);
-      return first;
+    if (attemptsThisRequest > 0) {
+      log?.warn?.("ROTATE", `opencode rotation exhausted for ${args.model} after ${attemptsThisRequest} attempt(s); returning original ${firstStatus}`);
     }
-
-    rotationStats.attempts += 1;
-    log?.debug?.("ROTATE", `opencode free-tier ${first.response.status} on ${args.model}; retrying via relay ${relay}`);
-
-    // Fresh session for the retry: a new quota bucket alongside the new IP. The
-    // stable session above exists to avoid churn during normal operation, but a
-    // request that already failed with a free-tier error has nothing left to lose.
-    const retryCredentials = { ...credentials, [SESSION_FIELD]: generateSessionId() };
-
-    let retried;
-    try {
-      retried = await super.execute({
-        ...args,
-        body: replayBody ? JSON.parse(JSON.stringify(replayBody)) : args.body,
-        credentials: retryCredentials,
-        proxyOptions: { ...(args.proxyOptions || {}), vercelRelayUrl: relay },
-      });
-    } catch (error) {
-      // The replay is strictly best-effort — surface the original failure so a
-      // relay problem never masks the real upstream error.
-      rotationStats.exhausted += 1;
-      log?.warn?.("ROTATE", `opencode rotated retry failed (${error.message}); returning original response`);
-      return first;
-    }
-
-    if (retried?.response?.ok) {
-      rotationStats.recovered += 1;
-      log?.debug?.("ROTATE", `opencode rotation recovered ${args.model} via relay ${relay}`);
-      return retried;
-    }
-
-    rotationStats.exhausted += 1;
-    log?.debug?.("ROTATE", `opencode rotation did not recover ${args.model} (${retried?.response?.status ?? "no response"})`);
     return first;
   }
 
