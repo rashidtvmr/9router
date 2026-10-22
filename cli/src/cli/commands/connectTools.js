@@ -183,6 +183,31 @@ const codex = {
 // ── OpenCode ────────────────────────────────────────────────────────────────
 const opencodePath = () => path.join(home(), ".config", "opencode", "opencode.json");
 
+// OpenCode only auto-generates low/medium/high for custom openai-compatible
+// models; 9router's picker offers the full ladder (THINKING_EFFORT_LADDER in
+// open-sse/providers/thinkingLevels.js) and the wire clamps rungs a model
+// cannot take. Keep values flat: { options: { reasoningEffort } } gets nested
+// under settings.options by OpenCode and never reaches the request.
+const OPENCODE_EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+function applyEffortVariants(existing) {
+  const out = {};
+  if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+    for (const [level, value] of Object.entries(existing)) {
+      if (!value || typeof value !== "object") {
+        out[level] = value;
+        continue;
+      }
+      const effort = value.reasoningEffort ?? value.options?.reasoningEffort;
+      out[level] = effort ? { reasoningEffort: effort } : value;
+    }
+  }
+  for (const level of OPENCODE_EFFORT_LADDER) {
+    if (!out[level]) out[level] = { reasoningEffort: level };
+  }
+  return out;
+}
+
 const opencode = {
   id: "opencode",
   name: "OpenCode",
@@ -199,7 +224,14 @@ const opencode = {
     const p = cfg.provider["9router"] || { npm: "@ai-sdk/openai-compatible", options: {}, models: {} };
     p.options = { ...p.options, baseURL: v1(baseUrl), apiKey };
     p.models = p.models || {};
-    p.models[model] = { name: model, modalities: { input: ["text", "image"], output: ["text"] } };
+    // Merge rather than replace: a bare entry would drop existing variants (and
+    // any other per-model settings) and only leave OpenCode's auto low/medium/high.
+    const existing = p.models[model];
+    const entry = existing && typeof existing === "object" ? { ...existing } : {};
+    entry.name = entry.name || model;
+    entry.modalities = entry.modalities || { input: ["text", "image"], output: ["text"] };
+    entry.variants = applyEffortVariants(entry.variants);
+    p.models[model] = entry;
     cfg.provider["9router"] = p;
     cfg.model = `9router/${model}`;
     cfg.agent = cfg.agent || {};

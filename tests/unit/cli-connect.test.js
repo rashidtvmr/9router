@@ -145,6 +145,38 @@ describe("connect tool writers", () => {
     expect(tool("pi").serverModel({ config: { providers: { other: { models: [{ id: "f" }] } } } })).toBeNull();
   });
 
+  it("opencode flattens legacy variant wrappers and declares the full effort ladder", async () => {
+    const f = path.join(home, ".config", "opencode", "opencode.json");
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, JSON.stringify({
+      provider: {
+        "9router": {
+          models: {
+            "oc/deepseek-v4.1-flash-free": {
+              name: "oc/deepseek-v4.1-flash-free",
+              modalities: { input: ["text", "image"], output: ["text"] },
+              variants: {
+                high: { options: { reasoningEffort: "high" } },
+                custom: { something: "else" },
+              },
+            },
+          },
+        },
+      },
+    }));
+    await tool("opencode").apply({ ...CTX, model: "oc/deepseek-v4.1-flash-free" });
+    const model = readJson(f).provider["9router"].models["oc/deepseek-v4.1-flash-free"];
+    expect(model.name).toBe("oc/deepseek-v4.1-flash-free");
+    expect(model.modalities).toEqual({ input: ["text", "image"], output: ["text"] });
+    // The legacy { options: {...} } wrapper is flattened so the effort reaches
+    // the request, and the user's extra key is preserved.
+    expect(model.variants.custom).toEqual({ something: "else" });
+    for (const level of ["low", "medium", "high", "xhigh", "max", "ultra"]) {
+      expect(model.variants[level]).toEqual({ reasoningEffort: level });
+    }
+    expect(readJson(f).model).toBe("9router/oc/deepseek-v4.1-flash-free");
+  });
+
   it("pi keeps other providers and writes the 9router model list", async () => {
     const f = path.join(home, ".pi", "agent", "models.json");
     fs.mkdirSync(path.dirname(f), { recursive: true });

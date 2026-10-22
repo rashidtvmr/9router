@@ -13,6 +13,34 @@ const execAsync = promisify(exec);
 const getConfigDir = () => path.join(os.homedir(), ".config", "opencode");
 const getConfigPath = () => path.join(getConfigDir(), "opencode.json");
 
+// OpenCode only auto-generates low/medium/high for openai-compatible custom
+// models. 9router's picker offers the full ladder (THINKING_EFFORT_LADDER in
+// open-sse/providers/thinkingLevels.js) and the wire layer clamps rungs a model
+// cannot take, so every model applied here declares the full set.
+// Keep the values flat: OpenCode nests { options: { reasoningEffort } } under
+// settings.options and the effort never reaches the request.
+const EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+// Preserve user edits, flatten legacy { options: { reasoningEffort } } entries,
+// then fill in any missing ladder rung.
+const normalizeEffortVariants = (existing) => {
+  const out = {};
+  if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+    for (const [level, value] of Object.entries(existing)) {
+      if (!value || typeof value !== "object") {
+        out[level] = value;
+        continue;
+      }
+      const effort = value.reasoningEffort ?? value.options?.reasoningEffort;
+      out[level] = effort ? { reasoningEffort: effort } : value;
+    }
+  }
+  for (const level of EFFORT_LADDER) {
+    if (!out[level]) out[level] = { reasoningEffort: level };
+  }
+  return out;
+};
+
 // Check if opencode CLI is installed (via which/where or config file exists)
 const checkOpenCodeInstalled = async () => {
   try {
@@ -105,12 +133,8 @@ export async function POST(request) {
 
     await fs.mkdir(configDir, { recursive: true });
 
-    // Read existing config or start fresh
-    let config = {};
-    try {
-      const existing = await fs.readFile(configPath, "utf-8");
-      config = JSON.parse(existing);
-    } catch { /* No existing config */ }
+    // Read existing config or start fresh (readConfig also handles JSONC).
+    const config = (await readConfig()) || {};
 
     const normalizedBaseUrl = baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
     const keyToUse = await resolveCliApiKey(apiKey);
@@ -132,10 +156,18 @@ export async function POST(request) {
     // Ensure models map exists
     existingProvider.models = existingProvider.models || {};
 
-    // Add or update entries for all requested models
+    // Add or update entries for all requested models. Merge into the existing
+    // entry instead of replacing it: a bare replacement would drop the
+    // reasoning-effort variants (and any other per-model settings) that make
+    // max/xhigh selectable in OpenCode.
     for (const m of modelsArray) {
       if (!m || typeof m !== "string") continue;
-      existingProvider.models[m] = { name: m, modalities: { input: ["text", "image"], output: ["text"] } };
+      const existing = existingProvider.models[m];
+      const entry = existing && typeof existing === "object" ? { ...existing } : {};
+      entry.name = entry.name || m;
+      entry.modalities = entry.modalities || { input: ["text", "image"], output: ["text"] };
+      entry.variants = normalizeEffortVariants(entry.variants);
+      existingProvider.models[m] = entry;
     }
 
     // Save merged provider back

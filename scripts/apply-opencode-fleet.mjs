@@ -5,6 +5,8 @@
 //      never overwrites an existing model).
 //   2. Merges reasoning-effort variants into model entries (adds missing keys
 //      only, never overwrites what is already there).
+//   2b. Declares the full 9router effort ladder (low..ultra) on every model in
+//      the `provider.9router` map, including models without curated variants.
 //   3. Pins `variant` on agents that exist in the target file (skips the rest).
 //   4. Creates the fleet agents that do not exist yet.
 //
@@ -20,455 +22,324 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 
+// 9router's selectable thinking ladder (THINKING_EFFORT_LADDER in
+// open-sse/providers/thinkingLevels.js). OpenCode only auto-generates
+// low/medium/high for custom openai-compatible models; the 9router wire clamps
+// rungs a model cannot take, so declaring the full ladder keeps every effort
+// selectable. A variant value must be a flat { reasoningEffort }: OpenCode's
+// V1->V2 migration nests { options: { reasoningEffort } } under
+// settings.options and the effort never reaches the request.
+const FULL_EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+// Drop legacy wrappers and preserve any extra/custom variant keys.
+function normalizeEffortVariants(existing) {
+  const out = {};
+  if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+    for (const [level, value] of Object.entries(existing)) {
+      if (!value || typeof value !== "object") {
+        out[level] = value;
+        continue;
+      }
+      const effort = value.reasoningEffort ?? value.options?.reasoningEffort;
+      out[level] = effort ? { reasoningEffort: effort } : value;
+    }
+  }
+  return out;
+}
+
 const MODEL_VARIANTS = {
   "9router||oc/muse-spark-1.3-contributor-free": {
     "minimal": {
-      "options": {
-        "reasoningEffort": "minimal"
-      }
+      "reasoningEffort": "minimal"
     },
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||oc/space-bunny-free": {
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||vyce-deepseek-v4-free-combined": {
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||vyce-deepseek-v4.1-free-combined": {
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "vyce||deepseek-v4.1": {
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||cmc/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||cx/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||expr/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||ocg/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||xk/openai/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "freebuff||openai/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "openai||gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "justwoker||gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||ai/ai/openai/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||th/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||luna-free": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||skai/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||an/free/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||jw/gpt-5.6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||xk/openai/gpt-6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||harbour-gpt-6-luna": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||oc/mimo-v2.6-flash-free": {
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||oc/exo-free": {
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||oc/deepseek-v4.1-flash-free": {
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||oc/glm-5.3-flash-free": {
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   // Probed raw on the free lane (2026-10-20): beam-free rejects "none" and
   // "minimal" (400), so its ladder starts at low.
   "9router||oc/beam-free": {
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||oc/nemotron-3.5-super-vl-free": {
     "minimal": {
-      "options": {
-        "reasoningEffort": "minimal"
-      }
+      "reasoningEffort": "minimal"
     },
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||oc/nemotron-3.5-lightning-free": {
     "minimal": {
-      "options": {
-        "reasoningEffort": "minimal"
-      }
+      "reasoningEffort": "minimal"
     },
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   },
   "9router||oc/longcat-2.5-preview-free": {
     "minimal": {
-      "options": {
-        "reasoningEffort": "minimal"
-      }
+      "reasoningEffort": "minimal"
     },
     "low": {
-      "options": {
-        "reasoningEffort": "low"
-      }
+      "reasoningEffort": "low"
     },
     "medium": {
-      "options": {
-        "reasoningEffort": "medium"
-      }
+      "reasoningEffort": "medium"
     },
     "high": {
-      "options": {
-        "reasoningEffort": "high"
-      }
+      "reasoningEffort": "high"
     },
     "xhigh": {
-      "options": {
-        "reasoningEffort": "xhigh"
-      }
+      "reasoningEffort": "xhigh"
     },
     "max": {
-      "options": {
-        "reasoningEffort": "max"
-      }
+      "reasoningEffort": "max"
     }
   }
 };
@@ -671,6 +542,26 @@ for (const [key, variants] of Object.entries(MODEL_VARIANTS)) {
     }
   }
   if (!found) skipped.push("model without entry: " + p + "/" + id);
+}
+
+// 1b. Full effort ladder for every 9router model in the active V1 provider map.
+//     Runs after the curated pass so custom keys survive, then every missing
+//     rung (notably xhigh/max/ultra) is filled in. The V2 `providers` map keeps
+//     the curated pass only: its variant shape is an array, while the OpenCode
+//     build these configs target resolves the V1 map.
+const p9 = cfg.provider?.["9router"]?.models;
+if (p9) {
+  for (const [id, entry] of Object.entries(p9)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const variants = normalizeEffortVariants(entry.variants);
+    for (const level of FULL_EFFORT_LADDER) {
+      if (!variants[level]) {
+        variants[level] = { reasoningEffort: level };
+        declared += 1;
+      }
+    }
+    entry.variants = variants;
+  }
 }
 
 // 2. Agent pins (existing agents only).
